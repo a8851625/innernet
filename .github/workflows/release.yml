@@ -1,35 +1,31 @@
 name: Release
 
-# Builds every deliverable artefact across platforms and attaches them to a
-# GitHub Release. Binaries are built on native runners instead of being
-# cross-compiled, because innernet links against the platform's WireGuard and
-# SQLite interfaces and a cross build would not prove either works.
+# Builds every artefact and publishes it to a GitHub Release.
 #
-# Trigger by pushing a tag (v1.2.3), or run manually to get the artefacts
-# without publishing a release.
+# Two ways to run:
+#   * push a tag  -> builds, creates the Release, uploads everything
+#   * manual      -> builds and uploads as workflow artifacts only
+#
+# Binaries are built on native runners rather than cross-compiled, because
+# innernet links against the platform's SQLite and WireGuard interfaces: a
+# cross build would not prove either one works.
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      release:
-        description: "Publish a GitHub Release (only applies to tags)"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
-  # Keep the workspace test binary from being built twice.
   CARGO_INCREMENTAL: 0
 
 jobs:
   # ---------------------------------------------------------------------------
-  # CLI + server for Linux, macOS and Windows.
+  # CLI + server. Each target gets its own native runner.
   # ---------------------------------------------------------------------------
   cli-server:
     name: cli+server (${{ matrix.target }})
@@ -40,19 +36,14 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: tar.gz
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            archive: tar.gz
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            archive: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
-            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +51,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          # macOS builds both architectures on the arm64 runner; the other
+          # targets build for their host default.
           targets: ${{ matrix.target }}
 
       - name: Install dependencies (Linux)
@@ -75,36 +68,56 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p innernet -p innernet-server
 
-      - name: Stage artefacts
+      - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          out="dist/innernet-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
-          mkdir -p "$out"
-          ext=""
-          if [ "${{ runner.os }}" = "Windows" ]; then ext=".exe"; fi
-          cp "target/${{ matrix.target }}/release/innernet${ext}" "$out/"
-          cp "target/${{ matrix.target }}/release/innernet-server${ext}" "$out/"
-          cp README.md LICENSE "$out/" 2>/dev/null || true
-          # Man pages and completions only make sense on unix-like targets.
-          if [ -d doc ] && [ "${{ runner.os }}" != "Windows" ]; then
-            cp -R doc "$out/" || true
-          fi
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a "${out}.zip" "$out" > /dev/null
+          # Tag builds carry the version in the ref; manual runs read it from
+          # the manifest. Grepping beats jq here because jq is not present on
+          # the Windows runner's bash.
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
           else
-            tar -czf "${out}.tar.gz" "$out"
+            version=$(grep -m1 '^version' client/Cargo.toml | cut -d'"' -f2)
           fi
-          ls -lh dist/
+          name="innernet-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+
+          ext=""
+          [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
+          cp "target/${{ matrix.target }}/release/innernet${ext}" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/innernet-server${ext}" "dist/$name/"
+          cp README.md LICENSE "dist/$name/" 2>/dev/null || true
+          [ -d doc ] && cp -R doc "dist/$name/" || true
+
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$name.zip" "$name" > /dev/null
+            rm -rf "$name"
+            echo "ARTIFACT=$name.zip" >> "$GITHUB_ENV"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            rm -rf "$name"
+            echo "ARTIFACT=$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+          ls -lh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: innernet-${{ matrix.target }}
+          name: cli-server-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
+      # Attach to the Release when this run was triggered by a tag.
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ env.ARTIFACT }}
+          fail_on_unmatched_files: true
+
   # ---------------------------------------------------------------------------
-  # Desktop GUI. Tauri needs the platform webview, so each OS builds its own.
+  # Desktop GUI. Tauri needs each platform's own webview, so one job per OS.
   # ---------------------------------------------------------------------------
   gui:
     name: gui (${{ matrix.platform }})
@@ -136,8 +149,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          # Cross-building macOS on the same runner needs the target installed;
-          # other platforms build for their own default target.
           targets: ${{ matrix.rust_target }}
 
       - name: Install dependencies (Linux)
@@ -145,33 +156,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libgtk-3-dev \
-            libsqlite3-dev
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libgtk-3-dev libsqlite3-dev
 
-      # The GUI shells out to the CLI, but it also reads `show --json`, so tests
-      # exercise the real parser.
-      - name: Unit tests
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri -> target
+
+      # The GUI shells out to the CLI, but it parses `show --json`, so the
+      # parser and the argv mapping are worth testing on every platform.
+      - name: Backend tests
         working-directory: gui/src-tauri
-        run: cargo test --release
+        run: cargo test --locked
 
       - name: Role gating tests
         run: node gui/tests/role-gating.test.mjs
 
-      - name: Build GUI
+      - name: Build bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: gui
           args: ${{ matrix.args }}
-          # Only attach to a release when this run is for a tag.
+          # tauri-action publishes straight to the Release for tag builds.
+          # An empty tagName means "do not touch releases".
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('innernet {0}', github.ref_name) || '' }}
-          releaseDraft: true
+          releaseBody: ""
+          releaseDraft: false
           prerelease: false
 
       - name: Collect bundles
@@ -179,20 +192,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find gui/src-tauri/target -maxdepth 4 -type f \
-            \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.msi" -o -name "*.exe" \
-               -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" \) \
+          find gui/src-tauri/target -type f \
+            \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.msi" \
+               -o -name "*.exe" -o -name "*.deb" -o -name "*.rpm" \
+               -o -name "*.AppImage" \) \
             -exec cp {} dist/ \; 2>/dev/null || true
-          ls -lh dist/ || echo "no bundles found"
+          ls -lh dist/ || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: innernet-gui-${{ matrix.platform }}
+          name: gui-${{ matrix.platform }}
           path: dist/*
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Wheel of the whole workspace: catches breakage that platform builds miss.
+  # Guards. These do not publish anything; they stop a broken tag from
+  # producing a Release.
   # ---------------------------------------------------------------------------
   checks:
     runs-on: ubuntu-latest
@@ -200,13 +215,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev pkg-config
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

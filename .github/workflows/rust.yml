@@ -48,8 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Pinned: rustfmt output changes between nightlies, and rustfmt.toml uses
+      # unstable options, so an unpinned nightly would make this job fail on
+      # code nobody touched.
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-11-01
           components: rustfmt
       - name: Rustfmt
         run: cargo fmt --all -- --check

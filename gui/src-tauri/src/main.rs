@@ -618,14 +618,6 @@ struct InvitePreview {
     server_endpoint: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct CidrList {
-    ok: bool,
-    error: Option<String>,
-    stdout: String,
-    cidrs: Vec<CidrSnapshot>,
-}
-
 // ---------------------------------------------------------------------------
 // CLI discovery
 // ---------------------------------------------------------------------------
