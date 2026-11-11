@@ -42,8 +42,6 @@ jobs:
             target: aarch64-apple-darwin
           - os: macos-latest
             target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
 
     steps:
       - uses: actions/checkout@v4
@@ -126,18 +124,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple silicon is the primary macOS target; Intel builds are not
+          # produced because the GUI is only distributed to the machines this
+          # fork is actually deployed on.
           - os: macos-latest
             platform: macos-aarch64
             rust_target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
-          - os: macos-latest
-            platform: macos-x86_64
-            rust_target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin
-          - os: ubuntu-22.04
-            platform: linux-x86_64
-            rust_target: ""
-            args: ""
           - os: windows-latest
             platform: windows-x86_64
             rust_target: ""

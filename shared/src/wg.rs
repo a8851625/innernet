@@ -172,7 +172,7 @@ pub fn add_route(interface: &InterfaceName, cidr: IpNet) -> Result<bool, io::Err
     if !output.status.success() {
         Err(io::Error::other(format!(
             "failed to add route for device {} ({}): {}",
-            &interface, real_interface, stderr
+            interface, real_interface, stderr
         )))
     } else {
         Ok(!stderr.contains("File exists"))

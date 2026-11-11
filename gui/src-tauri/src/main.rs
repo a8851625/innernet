@@ -944,7 +944,13 @@ fn run_privileged(binary: &str, args: &[String]) -> ActionResult {
     }
 }
 
-#[cfg(target_os = "macos")]
+/// Quote a single argument for POSIX sh.
+///
+/// Only the macOS path uses this (it builds an AppleScript string that runs
+/// through `sh`), but it is compiled everywhere so the quoting rules stay
+/// unit-tested on every platform CI builds. A broken quote here would be a
+/// shell injection, so it is worth testing off-macOS too.
+#[allow(dead_code)]
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }

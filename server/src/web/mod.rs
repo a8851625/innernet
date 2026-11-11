@@ -160,20 +160,6 @@ pub fn parse_subnets(body: &str) -> Result<Vec<IpNet>, String> {
     Ok(out)
 }
 
-/// Remove a peer's subnet routes (used when disabling a peer).
-pub fn clear_subnets(conn: &Connection, id: i64) -> Result<(), ServerError> {
-    let mut peer = DatabasePeer::get(conn, id)?;
-    if peer.allowed_subnets.is_empty() {
-        return Ok(());
-    }
-    let contents = PeerContents {
-        allowed_subnets: vec![],
-        ..peer.contents.clone()
-    };
-    peer.update(conn, contents)?;
-    Ok(())
-}
-
 /// Build the routing table component list for the web prefix.
 pub fn components(path: &str) -> Option<VecDeque<String>> {
     let rest = path.strip_prefix("/web")?;
@@ -229,7 +215,7 @@ pub async fn handle(
     _remote: SocketAddr,
     context: crate::Context,
 ) -> WebOutcome {
-    let interface = context.interface.clone();
+    let interface = context.interface;
     let backend = context.backend;
 
     // Read the body once, before taking the DB lock, so no guard is held across

@@ -571,7 +571,7 @@ pub async fn serve(
                 let context = web_context.clone();
                 async move {
                     Ok::<_, http::Error>(hyper::service::service_fn(move |req: Request<Body>| {
-                        log::debug!("web {} - {} {}", &remote_addr, req.method(), req.uri());
+                        log::debug!("web {} - {} {}", remote_addr, req.method(), req.uri());
                         hyper_service(req, context.clone(), remote_addr)
                     }))
                 }

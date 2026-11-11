@@ -75,7 +75,7 @@ mod handlers {
                 .add_peer(PeerConfigBuilder::from(&*peer))
                 .apply(&session.context.interface, session.context.backend)
                 .map_err(|_| ServerError::WireGuard)?;
-            log::info!("updated WireGuard interface for peer {}", &*peer);
+            log::info!("updated WireGuard interface for peer {}", peer.name);
         }
 
         status_response(StatusCode::NO_CONTENT)
