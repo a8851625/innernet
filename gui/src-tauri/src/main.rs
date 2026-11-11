@@ -643,9 +643,22 @@ fn cli_path() -> Result<String, String> {
         }
     }
 
+    // PATH is ':'-separated on unix and ';'-separated on Windows, and the
+    // binary carries an .exe suffix there. Getting this wrong makes the CLI
+    // unfindable on Windows even when it is on PATH.
+    let exe = if cfg!(windows) {
+        "innernet.exe"
+    } else {
+        "innernet"
+    };
+    let sep = if cfg!(windows) { ';' } else { ':' };
+
     if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
-            let p = Path::new(dir).join("innernet");
+        for dir in path.split(sep) {
+            if dir.trim().is_empty() {
+                continue;
+            }
+            let p = Path::new(dir).join(exe);
             if p.is_file() {
                 return Ok(p.display().to_string());
             }
@@ -1062,7 +1075,12 @@ mod tests {
             auto_ip: true,
             ip: None,
             admin: false,
-            save_config: "/tmp/laptop.toml".into(),
+            // Must exist: the action validates the parent directory, and a
+            // hardcoded /tmp does not exist on Windows.
+            save_config: std::env::temp_dir()
+                .join("laptop.toml")
+                .display()
+                .to_string(),
             advertise_routes: vec!["192.168.31.0/24".into(), "10.0.0.0/16".into()],
         });
         assert_eq!(a[0], "add-peer");
@@ -1220,6 +1238,35 @@ mod tests {
         assert!(!admin_only.iter().any(|a| member_allowed.contains(a)));
         assert!(admin_only.contains(&"add_peer"));
         assert!(member_allowed.contains(&"uninstall"));
+    }
+
+    /// CLI lookup must use the host's PATH separator and executable suffix.
+    /// A ':' split on Windows, or a missing .exe, silently fails to find a
+    /// CLI that is installed and on PATH.
+    #[test]
+    fn cli_lookup_matches_host_conventions() {
+        let exe = if cfg!(windows) {
+            "innernet.exe"
+        } else {
+            "innernet"
+        };
+        let sep = if cfg!(windows) { ';' } else { ':' };
+
+        // The suffix must be platform-correct; a bare "innernet" would not be
+        // executable on Windows.
+        assert_eq!(exe.ends_with(".exe"), cfg!(windows));
+
+        // A Windows PATH like "C:\a;C:\b" must not split on the drive colon.
+        let sample = if cfg!(windows) {
+            "C:\\first;C:\\second"
+        } else {
+            "/first:/second"
+        };
+        let parts: Vec<&str> = sample.split(sep).collect();
+        assert_eq!(parts.len(), 2, "PATH split on {sep:?} produced {parts:?}");
+        for p in parts {
+            assert!(!p.is_empty());
+        }
     }
 
     #[test]
