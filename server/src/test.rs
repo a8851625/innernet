@@ -273,6 +273,7 @@ pub fn peer_contents(
         is_redeemed: true,
         invite_expires: None,
         candidates: vec![],
+        allowed_subnets: vec![],
     })
 }
 

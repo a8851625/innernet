@@ -372,6 +372,7 @@ pub fn gather_new_peer_info(
             cidr_id: cidr.id,
             is_admin,
             invite_expires,
+            allowed_subnets: args.advertise_routes.clone(),
         };
 
         Ok(Some((input, invite_save_path)))

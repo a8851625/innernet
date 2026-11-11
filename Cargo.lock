@@ -818,6 +818,7 @@ dependencies = [
  "once_cell",
  "regex",
  "serde",
+ "serde_json",
  "toml",
  "url",
  "wireguard-control",

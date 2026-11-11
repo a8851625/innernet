@@ -360,6 +360,11 @@ pub struct AddPeerOpts {
     /// Invite expiration period (eg. '30d', '7w', '2h', '60m', '1000s')
     #[clap(long)]
     pub invite_expires: Option<Timestring>,
+
+    /// Subnets routed through this peer (subnet router), comma separated.
+    /// Example: --advertise-routes 192.168.1.0/24,10.0.0.0/16
+    #[clap(long = "advertise-routes", value_delimiter = ',')]
+    pub advertise_routes: Vec<IpNet>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -583,6 +588,11 @@ pub struct PeerContents {
     pub invite_expires: Option<SystemTime>,
     #[serde(default)]
     pub candidates: Vec<Endpoint>,
+    /// Additional network subnets routed through this peer (e.g. `192.168.1.0/24`).
+    /// The peer acts as a gateway for these ranges; they are advertised as
+    /// WireGuard `allowed-ips` so other peers route matching traffic to it.
+    #[serde(default)]
+    pub allowed_subnets: Vec<IpNet>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -714,6 +724,12 @@ impl<'a> PeerDiff<'a> {
         &self.changes
     }
 
+    /// The WireGuard peer configuration this diff resolves to.
+    /// Exposed so callers (and tests) can inspect the resulting allowed-ips.
+    pub fn peer_config(&self) -> PeerConfig {
+        self.builder.clone().into_peer_config()
+    }
+
     fn peer_config_builder(
         old_info: Option<&PeerInfo>,
         new: Option<&Peer>,
@@ -734,10 +750,22 @@ impl<'a> PeerDiff<'a> {
         // diff.new is now guaranteed to be a Some(_) variant.
         let new = new.unwrap();
 
-        let new_allowed_ips = &[AllowedIp {
+        // The peer is always reachable at its own address (/32 or /128), plus any
+        // additional subnets it routes for (subnet-router behaviour).
+        let mut new_allowed_ips = vec![AllowedIp {
             address: new.ip,
             cidr: if new.ip.is_ipv4() { 32 } else { 128 },
         }];
+        for subnet in &new.allowed_subnets {
+            let entry = AllowedIp {
+                address: subnet.addr(),
+                cidr: subnet.prefix_len(),
+            };
+            if !new_allowed_ips.contains(&entry) {
+                new_allowed_ips.push(entry);
+            }
+        }
+        let new_allowed_ips = &new_allowed_ips[..];
         if old.is_none() || matches!(old, Some(old) if old.allowed_ips != new_allowed_ips) {
             builder = builder
                 .replace_allowed_ips()
@@ -957,6 +985,7 @@ impl std::error::Error for WrappedIoError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json;
     use std::net::IpAddr;
     use wireguard_control::{Key, PeerConfigBuilder, PeerStats};
 
@@ -978,6 +1007,7 @@ mod tests {
                 is_redeemed: true,
                 invite_expires: None,
                 candidates: vec![],
+                allowed_subnets: vec![],
             },
         };
         let builder =
@@ -1013,6 +1043,7 @@ mod tests {
                 is_redeemed: true,
                 invite_expires: None,
                 candidates: vec![],
+                allowed_subnets: vec![],
             },
         };
         let builder =
@@ -1048,6 +1079,7 @@ mod tests {
                 is_redeemed: true,
                 invite_expires: None,
                 candidates: vec![],
+                allowed_subnets: vec![],
             },
         };
         let builder =
@@ -1071,5 +1103,161 @@ mod tests {
         // If there *has* been a recent handshake, endpoint should *not* be being set.
         info.stats.last_handshake_time = Some(SystemTime::now());
         assert!(matches!(PeerDiff::new(Some(&info), Some(&peer)), Ok(None)));
+    }
+
+    #[test]
+    fn test_allowed_subnets_json_roundtrip() {
+        // The client fetches peers as JSON from the server, so allowed_subnets
+        // must survive serialisation in both directions.
+        let contents = PeerContents {
+            name: "gw".parse().unwrap(),
+            ip: "10.60.1.9".parse().unwrap(),
+            cidr_id: 1,
+            public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            endpoint: None,
+            persistent_keepalive_interval: None,
+            is_admin: false,
+            is_disabled: false,
+            is_redeemed: true,
+            invite_expires: None,
+            candidates: vec![],
+            allowed_subnets: vec![
+                "192.168.31.0/24".parse().unwrap(),
+                "10.10.111.0/24".parse().unwrap(),
+            ],
+        };
+
+        let json = serde_json::to_string(&contents).unwrap();
+        assert!(
+            json.contains("allowed_subnets"),
+            "field missing from wire format: {json}"
+        );
+
+        let back: PeerContents = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.allowed_subnets, contents.allowed_subnets);
+
+        // Peers produced by an older server (no field) must still deserialise.
+        let legacy = json
+            .split(",\"allowed_subnets\"")
+            .next()
+            .unwrap()
+            .to_string()
+            + "}";
+        let legacy: PeerContents = serde_json::from_str(&legacy).unwrap();
+        assert!(
+            legacy.allowed_subnets.is_empty(),
+            "legacy payload should default to empty subnets"
+        );
+    }
+
+    #[test]
+    fn test_peer_diff_allowed_subnets() {
+        const PUBKEY: &str = "4CNZorWVtohO64n6AAaH/JyFjIIgBFrfJK2SGtKjzEE=";
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let subnets: Vec<IpNet> = vec![
+            "192.168.31.0/24".parse().unwrap(),
+            "10.10.111.0/24".parse().unwrap(),
+        ];
+
+        let peer = Peer {
+            id: 1,
+            contents: PeerContents {
+                name: "router-peer".parse().unwrap(),
+                ip,
+                cidr_id: 1,
+                public_key: PUBKEY.to_owned(),
+                endpoint: None,
+                persistent_keepalive_interval: None,
+                is_admin: false,
+                is_disabled: false,
+                is_redeemed: true,
+                invite_expires: None,
+                candidates: vec![],
+                allowed_subnets: subnets.clone(),
+            },
+        };
+
+        let diff = PeerDiff::new(None, Some(&peer)).unwrap().expect("expected a diff");
+        let config = diff.peer_config();
+        let allowed: Vec<(String, u8)> = config
+            .allowed_ips
+            .iter()
+            .map(|a| (a.address.to_string(), a.cidr))
+            .collect();
+
+        assert!(allowed.contains(&(ip.to_string(), 32)), "peer /32 missing: {allowed:?}");
+        assert!(
+            allowed.contains(&("192.168.31.0".to_string(), 24)),
+            "192.168.31.0/24 missing: {allowed:?}"
+        );
+        assert!(
+            allowed.contains(&("10.10.111.0".to_string(), 24)),
+            "10.10.111.0/24 missing: {allowed:?}"
+        );
+        assert_eq!(allowed.len(), 3, "unexpected extra allowed-ips: {allowed:?}");
+    }
+
+    #[test]
+    fn test_peer_diff_subnet_no_duplicate() {
+        const PUBKEY: &str = "4CNZorWVtohO64n6AAaH/JyFjIIgBFrfJK2SGtKjzEE=";
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let peer = Peer {
+            id: 1,
+            contents: PeerContents {
+                name: "dup-peer".parse().unwrap(),
+                ip,
+                cidr_id: 1,
+                public_key: PUBKEY.to_owned(),
+                endpoint: None,
+                persistent_keepalive_interval: None,
+                is_admin: false,
+                is_disabled: false,
+                is_redeemed: true,
+                invite_expires: None,
+                candidates: vec![],
+                allowed_subnets: vec!["10.0.0.0/24".parse().unwrap()],
+            },
+        };
+        let diff = PeerDiff::new(None, Some(&peer)).unwrap().expect("expected a diff");
+        let config = diff.peer_config();
+        let allowed: Vec<(String, u8)> = config
+            .allowed_ips
+            .iter()
+            .map(|a| (a.address.to_string(), a.cidr))
+            .collect();
+        assert_eq!(allowed.len(), 2, "peer /32 + /24 expected, got {allowed:?}");
+    }
+
+    #[test]
+    fn test_disabled_peer_removes_subnet_routes() {
+        const PUBKEY: &str = "4CNZorWVtohO64n6AAaH/JyFjIIgBFrfJK2SGtKjzEE=";
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let mut peer = Peer {
+            id: 1,
+            contents: PeerContents {
+                name: "router-peer".parse().unwrap(),
+                ip,
+                cidr_id: 1,
+                public_key: PUBKEY.to_owned(),
+                endpoint: None,
+                persistent_keepalive_interval: None,
+                is_admin: false,
+                is_disabled: false,
+                is_redeemed: true,
+                invite_expires: None,
+                candidates: vec![],
+                allowed_subnets: vec!["192.168.31.0/24".parse().unwrap()],
+            },
+        };
+        peer.contents.is_disabled = true;
+        let diff = PeerDiff::new(None, Some(&peer)).unwrap().expect("expected a diff");
+        // A disabled peer yields an empty peer config (no allowed-ips), which the
+        // backend interprets as "remove this peer".
+        let config = diff.peer_config();
+        assert!(
+            config.allowed_ips.is_empty(),
+            "disabled peer should advertise no routes, got {:?}",
+            config.allowed_ips
+        );
     }
 }

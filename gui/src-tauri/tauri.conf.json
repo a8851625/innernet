@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "innernet",
+  "version": "0.1.0",
+  "identifier": "no.tonari.innernet.gui",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "innernet",
+        "width": 980,
+        "height": 660,
+        "minWidth": 720,
+        "minHeight": 420,
+        "resizable": true,
+        "fullscreen": false,
+        "label": "main"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg",
+      "nsis"
+    ],
+    "icon": []
+  }
+}

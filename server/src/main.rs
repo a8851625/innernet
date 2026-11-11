@@ -63,6 +63,11 @@ enum Command {
 
         #[clap(flatten)]
         hosts: HostsOpts,
+
+        /// Bind the web admin UI to this loopback address:port.
+        /// Use an empty string to disable the web UI entirely.
+        #[clap(long = "web-listen", default_value = "127.0.0.1:8380")]
+        web_listen: String,
     },
 
     /// Add a peer to an existing network.
@@ -156,7 +161,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             interface,
             network: routing,
             hosts,
-        } => serve(*interface, &conf, routing, hosts).await?,
+            web_listen,
+        } => serve(*interface, &conf, routing, hosts, web_listen).await?,
         Command::AddPeer { interface, args } => add_peer(&interface, &conf, args, opts.network)?,
         Command::RenamePeer { interface, args } => rename_peer(&interface, &conf, args)?,
         Command::DisablePeer { interface, args } => {

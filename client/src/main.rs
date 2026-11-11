@@ -28,6 +28,7 @@ use std::{
 use util::{human_duration, human_size};
 use wireguard_control::{Device, InterfaceName, PeerInfo};
 
+mod json;
 mod util;
 
 struct PeerState<'a> {
@@ -94,6 +95,11 @@ enum Command {
         /// Display peers in a tree based on the CIDRs
         #[clap(short, long)]
         tree: bool,
+
+        /// Emit a machine-readable JSON snapshot instead of a table.
+        /// Intended for GUI clients; implies --short formatting is unnecessary.
+        #[clap(long)]
+        json: bool,
 
         interface: Option<Interface>,
     },
@@ -905,7 +911,13 @@ fn get_server_capabilities(config: &InterfaceConfig) -> Result<ServerCapabilitie
     }
 }
 
-fn show(opts: &Opts, short: bool, tree: bool, interface: Option<Interface>) -> Result<(), Error> {
+fn show(
+    opts: &Opts,
+    short: bool,
+    tree: bool,
+    json: bool,
+    interface: Option<Interface>,
+) -> Result<(), Error> {
     let interfaces = interface.map_or_else(
         || Device::list(opts.network.backend),
         |interface| Ok(vec![*interface]),
@@ -931,6 +943,36 @@ fn show(opts: &Opts, short: bool, tree: bool, interface: Option<Interface>) -> R
         // Filter out Ok(None).
         .filter_map(Result::transpose)
         .collect::<Result<Vec<_>, _>>()?;
+
+    if json {
+        // Machine-readable path for GUI clients: no colour, no tables.
+        //
+        // A GUI must be able to tell "no networks configured" apart from
+        // "not enough privileges to read the state", otherwise it silently
+        // renders an empty list for a user who simply lacks root.
+        let permission_denied = std::fs::read_dir(&opts.config_dir)
+            .err()
+            .map(|e| e.kind() == io::ErrorKind::PermissionDenied)
+            .unwrap_or(false);
+
+        let mut interfaces = Vec::with_capacity(devices.len());
+        for (device_info, store, interface_config) in &devices {
+            interfaces.push(json::interface_snapshot(
+                &device_info.name.as_str_lossy(),
+                Some(device_info),
+                store,
+                interface_config,
+            ));
+        }
+        let snapshot = json::Snapshot {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            config_dir: opts.config_dir.display().to_string(),
+            permission_denied,
+            interfaces,
+        };
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        return Ok(());
+    }
 
     if devices.is_empty() {
         log::info!("No innernet networks currently running.");
@@ -1146,6 +1188,7 @@ fn run(opts: &Opts) -> Result<(), Error> {
     let command = opts.command.clone().unwrap_or(Command::Show {
         short: false,
         tree: false,
+        json: false,
         interface: None,
     });
 
@@ -1160,8 +1203,9 @@ fn run(opts: &Opts) -> Result<(), Error> {
         Command::Show {
             short,
             tree,
+            json,
             interface,
-        } => show(opts, short, tree, interface)?,
+        } => show(opts, short, tree, json, interface)?,
         Command::Fetch {
             interface,
             hosts,
