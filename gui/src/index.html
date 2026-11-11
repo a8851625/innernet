@@ -1,0 +1,1576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>innernet</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d11;
+    --surface: #14171d;
+    --surface-2: #1a1e26;
+    --surface-3: #20252f;
+    --surface-4: #262c38;
+    --line: #232833;
+    --line-soft: #1b2028;
+    --text: #e8eaf0;
+    --text-dim: #8b93a7;
+    --text-faint: #5d6478;
+    --accent: #5b9dff;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --radius: 10px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -webkit-user-select: none; user-select: none;
+    overflow: hidden;
+  }
+
+  .app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---------------------------------------------------------------- topbar */
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 14px; height: 52px; flex: none;
+    background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; }
+  .brand svg { display: block; color: var(--accent); }
+  .wordmark { font-size: 13.5px; font-weight: 590; letter-spacing: -0.01em; }
+
+  .status {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11.5px; color: var(--text-dim);
+    padding: 4px 9px 4px 8px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  .status .led { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+  .status.on .led { background: var(--green); box-shadow: 0 0 7px rgba(52,211,153,.65); }
+  .status.on { color: #a7f3d0; border-color: rgba(52,211,153,.25); background: rgba(52,211,153,.08); }
+  .status.off .led { background: var(--red); }
+  .status.off { color: #fca5a5; border-color: rgba(248,113,113,.25); background: rgba(248,113,113,.08); }
+
+  .role {
+    font-size: 10.5px; font-weight: 600; letter-spacing: .03em;
+    text-transform: uppercase; padding: 3px 8px; border-radius: 5px;
+    white-space: nowrap;
+  }
+  .role.admin { background: rgba(251,191,36,.14); color: var(--amber); }
+  .role.member { background: var(--surface-3); color: var(--text-faint); }
+
+  .grow { flex: 1; }
+
+  button {
+    font: inherit; font-size: 12px; font-weight: 500;
+    color: var(--text); background: var(--surface-2);
+    border: 1px solid var(--line); border-radius: 7px;
+    padding: 6px 11px; cursor: pointer;
+    transition: background .13s, border-color .13s;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { background: var(--surface-3); border-color: #2e3542; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--accent); border-color: transparent; color: #fff; }
+  button.primary:hover:not(:disabled) { background: #6ba8ff; border-color: transparent; }
+  button.subtle { background: transparent; border-color: transparent; color: var(--text-dim); }
+  button.subtle:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
+  button.danger { color: #fca5a5; }
+  button.danger:hover:not(:disabled) {
+    background: rgba(248,113,113,.12); border-color: rgba(248,113,113,.35);
+  }
+  button.sm { font-size: 11px; padding: 4px 8px; }
+
+  /* ------------------------------------------------------------------ main */
+  main { flex: 1; overflow-y: auto; padding: 14px; }
+  main::-webkit-scrollbar { width: 10px; }
+  main::-webkit-scrollbar-thumb { background: #2a303b; border-radius: 5px; border: 3px solid var(--bg); }
+
+  /* --------------------------------------------------------------- network */
+  .network {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); overflow: hidden; margin-bottom: 14px;
+  }
+  .network-head {
+    display: flex; align-items: center; gap: 9px;
+    padding: 11px 13px;
+    background: linear-gradient(180deg, var(--surface-2), var(--surface));
+    border-bottom: 1px solid var(--line);
+  }
+  .network-head .led { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .led.up { background: var(--green); box-shadow: 0 0 8px rgba(52,211,153,.6); }
+  .led.down { background: var(--text-faint); }
+  .network-name { font-size: 13.5px; font-weight: 590; letter-spacing: -0.01em; }
+
+  .chip {
+    font-size: 10.5px; padding: 2px 7px; border-radius: 5px;
+    background: var(--surface-3); color: var(--text-dim); white-space: nowrap;
+  }
+  .chip.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+  /* tabs inside a network card */
+  .tabs {
+    display: flex; gap: 2px; padding: 0 8px;
+    background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  .tab {
+    font-size: 11.5px; font-weight: 500; color: var(--text-faint);
+    padding: 7px 10px; cursor: pointer; border: 0; background: transparent;
+    border-bottom: 2px solid transparent; border-radius: 0;
+  }
+  .tab:hover { color: var(--text-dim); background: transparent; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  /* peers */
+  .peers { display: flex; flex-direction: column; }
+  .peer {
+    display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto;
+    align-items: center; gap: 10px; padding: 10px 13px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .peer:last-child { border-bottom: 0; }
+  .peer:hover { background: rgba(255,255,255,.018); }
+  .peer.is-you { background: rgba(91,157,255,.045); }
+  .peer.is-off .peer-name, .peer.is-off .peer-ip { opacity: .45; }
+  .peer-led { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+  .peer-led.on { background: var(--green); box-shadow: 0 0 6px rgba(52,211,153,.55); }
+  .peer-led.self { background: var(--accent); box-shadow: 0 0 6px rgba(91,157,255,.55); }
+  .peer-body { min-width: 0; }
+  .peer-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .peer-name { font-size: 12.5px; font-weight: 510; }
+  .peer-meta {
+    display: flex; align-items: center; gap: 8px; margin-top: 2px;
+    font-size: 11px; color: var(--text-faint);
+  }
+  .peer-ip {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; color: var(--text-dim);
+  }
+  .badge {
+    font-size: 9.5px; font-weight: 600; letter-spacing: .03em;
+    text-transform: uppercase; padding: 1.5px 5px; border-radius: 4px;
+  }
+  .badge.you { background: rgba(91,157,255,.16); color: #93c0ff; }
+  .badge.admin { background: rgba(251,191,36,.14); color: var(--amber); }
+  .badge.off { background: rgba(139,147,167,.14); color: var(--text-dim); }
+  .route {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10px; padding: 1.5px 6px; border-radius: 4px;
+    background: rgba(251,191,36,.1); color: #fcd34d;
+    border: 1px solid rgba(251,191,36,.16); white-space: nowrap;
+  }
+  .peer-stats { display: flex; gap: 12px; }
+  .stat { text-align: right; min-width: 50px; }
+  .stat .k {
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--text-faint); display: block;
+  }
+  .stat .v {
+    font-size: 11px; color: var(--text-dim);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .stat .v.live { color: var(--green); }
+
+  .row-actions { display: flex; gap: 4px; opacity: 0; transition: opacity .12s; }
+  .peer:hover .row-actions { opacity: 1; }
+
+  /* cidr / association lists */
+  .list { padding: 4px 0; }
+  .list-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 13px; border-bottom: 1px solid var(--line-soft);
+    font-size: 12px;
+  }
+  .list-row:last-child { border-bottom: 0; }
+  .list-row .name { font-weight: 510; }
+  .list-row .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; color: var(--text-dim);
+  }
+  .arrow { color: var(--text-faint); font-size: 11px; }
+
+  /* panel footer with a form */
+  .panel-foot {
+    padding: 10px 13px; border-top: 1px solid var(--line);
+    background: rgba(255,255,255,.012);
+    display: flex; gap: 7px; align-items: center; flex-wrap: wrap;
+  }
+  .panel-foot .hint {
+    font-size: 11px; color: var(--text-faint); padding: 9px 13px;
+  }
+
+  input, select {
+    font: inherit; font-size: 12px; color: var(--text);
+    background: #0e1116; border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 8px; min-width: 0;
+    -webkit-user-select: text; user-select: text;
+  }
+  input:focus, select:focus {
+    outline: none; border-color: rgba(91,157,255,.55);
+    box-shadow: 0 0 0 2px rgba(91,157,255,.12);
+  }
+  input::placeholder { color: #4a5162; }
+  input.grow { flex: 1; }
+  .w-sm { width: 90px; }
+  .w-md { width: 130px; }
+  .w-lg { width: 170px; }
+
+  label.field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-faint); }
+  label.field input, label.field select { width: 100%; }
+
+  /* ---------------------------------------------------------------- states */
+  .state {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; text-align: center; padding: 48px 28px; gap: 3px;
+  }
+  .state .icon { width: 40px; height: 40px; margin-bottom: 10px; opacity: .3; }
+  .state h3 { font-size: 13.5px; font-weight: 590; }
+  .state p {
+    font-size: 12px; color: var(--text-dim);
+    max-width: 430px; line-height: 1.55; margin-top: 2px;
+  }
+  .state .actions { margin-top: 15px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .state pre {
+    margin-top: 13px; text-align: left; width: 100%; max-width: 560px;
+    background: #0e1116; border: 1px solid var(--line); border-radius: 8px;
+    padding: 11px 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; line-height: 1.6; color: var(--text-dim);
+    white-space: pre-wrap; word-break: break-word;
+    -webkit-user-select: text; user-select: text;
+    max-height: 200px; overflow: auto;
+  }
+  .state.err .icon { color: var(--red); opacity: .7; }
+  .state.err h3 { color: #fca5a5; }
+
+  /* skeleton */
+  .skeleton-net {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); overflow: hidden; margin-bottom: 14px;
+  }
+  .sk {
+    background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 50%, var(--surface-2) 100%);
+    background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite; border-radius: 5px;
+  }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  .sk-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .sk-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line-soft); }
+  .sk-row:last-child { border-bottom: 0; }
+
+  /* --------------------------------------------------------------- dialog  */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px; z-index: 50; backdrop-filter: blur(2px);
+  }
+  .scrim[hidden] { display: none; }
+  .dialog {
+    width: min(560px, 100%); max-height: 100%;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; box-shadow: 0 24px 64px rgba(0,0,0,.6);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .dialog h2 {
+    font-size: 14px; font-weight: 590; padding: 15px 16px 0 16px;
+    letter-spacing: -0.01em;
+  }
+  .dialog .sub {
+    font-size: 12px; color: var(--text-dim); padding: 3px 16px 0 16px;
+    line-height: 1.5;
+  }
+  .dialog .body { padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 11px; }
+  .dialog .foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 16px; border-top: 1px solid var(--line);
+    background: rgba(255,255,255,.012);
+  }
+  .kv { display: flex; flex-direction: column; gap: 7px; }
+  .kv-row {
+    display: flex; justify-content: space-between; gap: 12px;
+    font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--line-soft);
+  }
+  .kv-row:last-child { border-bottom: 0; }
+  .kv-row .k { color: var(--text-faint); }
+  .kv-row .v { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; -webkit-user-select: text; user-select: text; }
+  .checkbox { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); }
+  .checkbox input { width: auto; }
+  .warn {
+    font-size: 11.5px; line-height: 1.55; color: #fcd34d;
+    background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.2);
+    border-radius: 7px; padding: 9px 11px;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 9px; }
+
+  /* activity log */
+  .log { display: flex; flex-direction: column; gap: 0; }
+  .log-entry {
+    display: flex; gap: 9px; padding: 8px 13px;
+    border-bottom: 1px solid var(--line-soft); font-size: 11.5px;
+    -webkit-user-select: text; user-select: text;
+  }
+  .log-entry:last-child { border-bottom: 0; }
+  .log-entry .mark { flex: none; font-family: ui-monospace, monospace; }
+  .log-entry .mark.ok { color: var(--green); }
+  .log-entry .mark.err { color: var(--red); }
+  .log-entry .body { min-width: 0; flex: 1; }
+  .log-entry .cmd {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; color: var(--text-dim); word-break: break-all;
+  }
+  .log-entry .out {
+    margin-top: 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10.5px; color: var(--text-faint);
+    white-space: pre-wrap; word-break: break-word; max-height: 100px; overflow: auto;
+  }
+
+  /* toast */
+  #toast {
+    position: fixed; left: 50%; bottom: 16px; transform: translate(-50%, 8px);
+    max-width: min(560px, calc(100vw - 40px));
+    padding: 10px 14px; border-radius: 9px; font-size: 12px; line-height: 1.5;
+    background: var(--surface-3); border: 1px solid var(--line);
+    box-shadow: 0 8px 28px rgba(0,0,0,.5);
+    opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s;
+    white-space: pre-wrap; -webkit-user-select: text; user-select: text;
+    max-height: 40vh; overflow: auto; z-index: 100;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #toast.ok { border-color: rgba(52,211,153,.35); color: #a7f3d0; }
+  #toast.err { border-color: rgba(248,113,113,.35); color: #fca5a5; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinning { animation: spin .9s linear infinite; display: inline-block; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="9.25" stroke="currentColor" stroke-width="1.9"
+                stroke-linecap="round" stroke-dasharray="38 20" transform="rotate(-45 12 12)"/>
+        <circle cx="12" cy="12" r="3.6" fill="currentColor"/>
+      </svg>
+      <span class="wordmark">innernet</span>
+    </div>
+    <div class="status" id="status"><span class="led"></span><span id="statusText">Starting…</span></div>
+    <div class="role" id="roleChip" hidden></div>
+    <div class="grow"></div>
+    <button class="subtle" id="refreshBtn">Refresh</button>
+    <button class="primary" id="joinBtn">Join network…</button>
+  </header>
+
+  <main id="main"></main>
+</div>
+
+<div id="toast"></div>
+<div id="scrim" class="scrim" hidden><div class="dialog" id="dialog"></div></div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// bridge
+// ---------------------------------------------------------------------------
+// Resolve the Tauri bridge defensively. If the runtime did not inject it, the
+// window must say so instead of sitting on a spinner forever.
+const TAURI = window.__TAURI__ || window.__TAURI_INTERNALS__ || null;
+const invoke = TAURI && TAURI.core ? TAURI.core.invoke : null;
+// File picker lives in the dialog plugin when present; degrade gracefully.
+const openDialog = TAURI && TAURI.dialog && TAURI.dialog.open ? TAURI.dialog.open : null;
+
+const $ = (id) => document.getElementById(id);
+const mainEl = $("main");
+const statusEl = $("status");
+const statusTextEl = $("statusText");
+const refreshBtn = $("refreshBtn");
+const joinBtn = $("joinBtn");
+const scrim = $("scrim");
+const dialogEl = $("dialog");
+
+let busy = false;
+let snapshot = null;
+
+// ---------------------------------------------------------------------------
+// role
+// ---------------------------------------------------------------------------
+// The server enforces admin rights on every mutating call, so this is a UI
+// concern only: it must not offer a button that is guaranteed to fail with 401.
+// A member can still do everything that affects just their own machine.
+function roleOf(iface) {
+  const me = (iface.peers || []).find((p) => p.is_you);
+  if (!me) return "unknown";
+  if (me.is_disabled) return "disabled";
+  return me.is_admin ? "admin" : "member";
+}
+
+function isAdmin(iface) {
+  return roleOf(iface) === "admin";
+}
+let logEntries = [];
+let activeTab = {};   // interface name -> tab id
+let selectedInvite = sessionStorage.getItem("invitePath") || "";
+
+// ---------------------------------------------------------------------------
+// utils
+// ---------------------------------------------------------------------------
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+}[c]));
+
+function bytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(v < 10 ? 1 : 0)) + " " + u[i];
+}
+
+function ago(secs) {
+  if (secs === null || secs === undefined) return "never";
+  if (secs < 5) return "now";
+  if (secs < 60) return secs + "s ago";
+  if (secs < 3600) return Math.floor(secs / 60) + "m ago";
+  if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
+  return Math.floor(secs / 86400) + "d ago";
+}
+
+function toast(msg, kind) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.className = "show " + (kind || "");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = ""; }, 5000);
+}
+
+function setStatus(cls, text) {
+  statusEl.className = "status" + (cls ? " " + cls : "");
+  statusTextEl.textContent = text;
+}
+
+function setRoleChip(role) {
+  const el = $("roleChip");
+  if (!el) return;
+  if (!role || role === "unknown") { el.hidden = true; return; }
+  el.hidden = false;
+  el.className = "role " + (role === "admin" ? "admin" : "member");
+  el.textContent = role === "admin" ? "admin" : "member";
+  el.title = role === "admin"
+    ? "You can invite peers and manage this network"
+    : "You can use this network but not change it";
+}
+
+function setBusy(on) {
+  busy = on;
+  refreshBtn.disabled = on;
+  joinBtn.disabled = on;
+  refreshBtn.innerHTML = on ? '<span class="spinning">◐</span>' : "Refresh";
+  document.querySelectorAll("button[data-needs-idle]").forEach((b) => { b.disabled = on; });
+}
+
+// ---------------------------------------------------------------------------
+// dialogs
+// ---------------------------------------------------------------------------
+function closeDialog() { scrim.hidden = true; dialogEl.innerHTML = ""; }
+
+function showDialog({ title, sub, body, footer }) {
+  dialogEl.innerHTML = "";
+  const h = document.createElement("h2");
+  h.textContent = title;
+  dialogEl.appendChild(h);
+  if (sub) {
+    const s = document.createElement("div");
+    s.className = "sub";
+    s.textContent = sub;
+    dialogEl.appendChild(s);
+  }
+  const b = document.createElement("div");
+  b.className = "body";
+  if (typeof body === "string") b.innerHTML = body;
+  else if (body) b.appendChild(body);
+  dialogEl.appendChild(b);
+
+  const f = document.createElement("div");
+  f.className = "foot";
+  for (const btn of footer || []) {
+    const el = document.createElement("button");
+    el.textContent = btn.label;
+    if (btn.kind) el.className = btn.kind;
+    el.onclick = btn.onClick;
+    f.appendChild(el);
+  }
+  dialogEl.appendChild(f);
+  scrim.hidden = false;
+  return { bodyEl: b };
+}
+
+function confirmDialog({ title, sub, warning, confirmLabel, danger, onConfirm }) {
+  const foot = [
+    { label: "Cancel", kind: "subtle", onClick: closeDialog },
+    {
+      label: confirmLabel || "Confirm",
+      kind: danger ? "danger" : "primary",
+      onClick: async () => { closeDialog(); await onConfirm(); },
+    },
+  ];
+  showDialog({
+    title,
+    sub,
+    body: warning ? '<div class="warn">' + esc(warning) + "</div>" : "",
+    footer: foot,
+  });
+}
+
+scrim.onclick = (e) => { if (e.target === scrim) closeDialog(); };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !scrim.hidden) closeDialog();
+});
+
+// ---------------------------------------------------------------------------
+// activity log
+// ---------------------------------------------------------------------------
+function pushLog(ok, command, detail) {
+  logEntries.unshift({ ok, command, detail, at: new Date() });
+  if (logEntries.length > 40) logEntries.pop();
+  if (snapshot) renderMain();
+}
+
+// ---------------------------------------------------------------------------
+// actions
+// ---------------------------------------------------------------------------
+// Actions that mutate the network for other people. The server enforces this
+// too (401), but refusing early avoids a pointless round trip and gives a
+// message that explains the rule instead of reporting a failure.
+const ADMIN_ACTIONS = new Set([
+  "add_peer", "disable_peer", "enable_peer", "rename_peer",
+  "add_cidr", "rename_cidr", "delete_cidr",
+  "add_association", "delete_association",
+]);
+
+async function run(action, { quiet } = {}) {
+  if (!invoke) { toast("Application bridge unavailable", "err"); return null; }
+
+  // Guard at the choke point, not only at the buttons: the button gating above
+  // is cosmetic and could be bypassed from the web inspector.
+  const verb = Object.keys(action)[0];
+  if (ADMIN_ACTIONS.has(verb)) {
+    const ifaceName = action[verb] && action[verb].interface;
+    const iface = ((snapshot && snapshot.interfaces) || []).find((i) => i.name === ifaceName);
+    if (iface && !isAdmin(iface)) {
+      toast("Not permitted: only network admins can do this.", "err");
+      return null;
+    }
+  }
+
+  setBusy(true);
+  try {
+    const res = await invoke("run_action", { action });
+    pushLog(!!res.ok, res.command || "", (res.ok ? res.stdout : (res.stderr || "")).trim());
+
+    if (!quiet) {
+      if (res.ok) {
+        const out = (res.stdout || "").trim();
+        toast(out ? "Done\n" + out : "Done", "ok");
+      } else if (res.needs_admin) {
+        // The server rejected this because the peer is not an admin. Do not
+        // offer an authorisation prompt: no amount of local privilege helps.
+        toast(
+          "Not permitted: only network admins can do this.\n\n" +
+          "Ask an admin to grant your peer admin rights, or to perform it for you.",
+          "err"
+        );
+      } else if (res.needs_privileges) {
+        toast("Permission denied. The app needs authorisation to change network settings.", "err");
+      } else {
+        toast((res.stderr || "").trim() || "Action failed", "err");
+      }
+    }
+    return res;
+  } catch (e) {
+    pushLog(false, "", String(e && e.message ? e.message : e));
+    if (!quiet) toast(String(e && e.message ? e.message : e), "err");
+    return null;
+  } finally {
+    setBusy(false);
+    await load();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// rendering
+// ---------------------------------------------------------------------------
+function skeleton() {
+  mainEl.innerHTML = "";
+  for (let n = 0; n < 2; n++) {
+    const box = document.createElement("div");
+    box.className = "skeleton-net";
+    box.innerHTML =
+      '<div class="sk-head">' +
+        '<div class="sk" style="width:8px;height:8px;border-radius:50%"></div>' +
+        '<div class="sk" style="width:' + (110 + n * 30) + 'px;height:11px"></div>' +
+        '<div class="sk" style="width:74px;height:14px"></div>' +
+      "</div>";
+    for (let r = 0; r < 3; r++) {
+      const row = document.createElement("div");
+      row.className = "sk-row";
+      row.innerHTML =
+        '<div class="sk" style="width:7px;height:7px;border-radius:50%"></div>' +
+        '<div style="flex:1"><div class="sk" style="width:' + (70 + r * 26) +
+          'px;height:10px;margin-bottom:5px"></div>' +
+        '<div class="sk" style="width:96px;height:8px;opacity:.6"></div></div>' +
+        '<div class="sk" style="width:52px;height:9px"></div>';
+      box.appendChild(row);
+    }
+    mainEl.appendChild(box);
+  }
+}
+
+const ICON_CROSS =
+  '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">' +
+  '<circle cx="12" cy="12" r="9.25"/><path d="M12 7.5v5.5" stroke-linecap="round"/>' +
+  '<circle cx="12" cy="16.4" r="1" fill="currentColor" stroke="none"/></svg>';
+
+const ICON_EMPTY =
+  '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">' +
+  '<circle cx="12" cy="12" r="9.25" stroke-dasharray="3.5 4" stroke-linecap="round"/>' +
+  '<circle cx="12" cy="12" r="2.6"/></svg>';
+
+function renderState(o) {
+  mainEl.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "state" + (o.kind === "err" ? " err" : "");
+  wrap.innerHTML = (o.kind === "err" ? ICON_CROSS : ICON_EMPTY) +
+    "<h3>" + esc(o.title) + "</h3><p>" + esc(o.body) + "</p>";
+  if (o.detail) {
+    const pre = document.createElement("pre");
+    pre.textContent = o.detail;
+    wrap.appendChild(pre);
+  }
+  if (o.actions && o.actions.length) {
+    const bar = document.createElement("div");
+    bar.className = "actions";
+    for (const a of o.actions) {
+      const b = document.createElement("button");
+      b.textContent = a.label;
+      if (a.kind) b.className = a.kind;
+      b.onclick = a.onClick;
+      bar.appendChild(b);
+    }
+    wrap.appendChild(bar);
+  }
+  mainEl.appendChild(wrap);
+}
+
+// -- peer row ---------------------------------------------------------------
+function renderPeer(iface, p) {
+  const row = document.createElement("div");
+  row.className = "peer" + (p.is_you ? " is-you" : "") + (p.is_disabled ? " is-off" : "");
+
+  const led = document.createElement("span");
+  led.className = "peer-led" + (p.is_you ? " self" : (p.is_connected ? " on" : ""));
+  led.title = p.is_you ? "this device" : (p.is_connected ? "connected" : "no recent handshake");
+  row.appendChild(led);
+
+  const body = document.createElement("div");
+  body.className = "peer-body";
+  const title = document.createElement("div");
+  title.className = "peer-title";
+
+  const nm = document.createElement("span");
+  nm.className = "peer-name";
+  nm.textContent = p.name;
+  title.appendChild(nm);
+
+  if (p.is_you) title.insertAdjacentHTML("beforeend", '<span class="badge you">you</span>');
+  if (p.is_admin && !p.is_you) title.insertAdjacentHTML("beforeend", '<span class="badge admin">admin</span>');
+  if (p.is_disabled) title.insertAdjacentHTML("beforeend", '<span class="badge off">disabled</span>');
+  for (const s of p.allowed_subnets || []) {
+    title.insertAdjacentHTML("beforeend", '<span class="route" title="routed subnet">' + esc(s) + "</span>");
+  }
+  body.appendChild(title);
+
+  const meta = document.createElement("div");
+  meta.className = "peer-meta";
+  const ip = document.createElement("span");
+  ip.className = "peer-ip";
+  ip.textContent = p.ip;
+  meta.appendChild(ip);
+
+  if (p.endpoint) {
+    const ep = document.createElement("span");
+    ep.className = "peer-ip";
+    ep.textContent = p.endpoint;
+    if (p.endpoint_overridden) { ep.style.color = "var(--amber)"; ep.title = "endpoint overridden"; }
+    meta.appendChild(ep);
+  } else if (p.is_you) {
+    const l = document.createElement("span");
+    l.textContent = "local";
+    meta.appendChild(l);
+  }
+  body.appendChild(meta);
+  row.appendChild(body);
+
+  const stats = document.createElement("div");
+  stats.className = "peer-stats";
+  if (!p.is_you) {
+    const hs = document.createElement("div");
+    hs.className = "stat";
+    const live = p.last_handshake_secs_ago != null && p.last_handshake_secs_ago < 180;
+    hs.innerHTML = '<span class="k">handshake</span><span class="v' +
+      (live ? " live" : "") + '">' + esc(ago(p.last_handshake_secs_ago)) + "</span>";
+    stats.appendChild(hs);
+  }
+  if (p.rx_bytes || p.tx_bytes) {
+    const tf = document.createElement("div");
+    tf.className = "stat";
+    tf.innerHTML = '<span class="k">transfer</span><span class="v">' +
+      esc(bytes(p.rx_bytes)) + " ↓ " + esc(bytes(p.tx_bytes)) + " ↑</span>";
+    stats.appendChild(tf);
+  }
+  row.appendChild(stats);
+
+  // per-peer actions
+  const acts = document.createElement("div");
+  acts.className = "row-actions";
+
+  const mk = (label, fn, kind) => {
+    const b = document.createElement("button");
+    b.className = "sm" + (kind ? " " + kind : "");
+    b.textContent = label;
+    b.dataset.needsIdle = "1";
+    b.onclick = fn;
+    return b;
+  };
+
+  if (p.is_you) {
+    // Your own endpoint is a local setting, so members keep it.
+    acts.appendChild(mk("Endpoint…", () => openEndpointDialog(iface, p)));
+  } else {
+    // Everything below changes the network for someone else, so it is
+    // admin-only. A member sees no buttons rather than ones that would 401.
+    acts.appendChild(mk("Routes…", () => openPeerRoutesDialog(iface, p)));
+    if (isAdmin(iface)) {
+      acts.appendChild(mk("Endpoint…", () => openPeerEndpointDialog(iface, p)));
+      acts.appendChild(mk("Rename…", () => openRenamePeerDialog(iface, p)));
+    }
+    if (p.is_disabled) {
+      if (isAdmin(iface)) {
+        acts.appendChild(mk("Enable", () => run({ enable_peer: { interface: iface.name, name: p.name } })));
+      }
+    } else if (isAdmin(iface)) {
+      acts.appendChild(mk("Disable", () => confirmDialog({
+        title: "Disable " + p.name + "?",
+        sub: "The peer is removed from the WireGuard interface immediately. Its config is kept, so it can be re-enabled later.",
+        warning: "Traffic from this device stops working right away.",
+        confirmLabel: "Disable peer",
+        danger: true,
+        onConfirm: () => run({ disable_peer: { interface: iface.name, name: p.name } }),
+      }), "danger"));
+    }
+  }
+  row.appendChild(acts);
+  return row;
+}
+
+// -- network card -----------------------------------------------------------
+function renderNetwork(iface) {
+  const net = document.createElement("section");
+  net.className = "network";
+
+  const head = document.createElement("div");
+  head.className = "network-head";
+  head.innerHTML =
+    '<span class="led ' + (iface.is_up ? "up" : "down") + '"></span>' +
+    '<span class="network-name">' + esc(iface.name) + "</span>" +
+    '<span class="chip mono">' + esc(iface.address) + "/" + esc(iface.network_cidr_prefix) + "</span>" +
+    (iface.listen_port ? '<span class="chip mono">:' + esc(iface.listen_port) + "</span>" : "") +
+    '<div class="grow"></div>';
+
+  const syncBtn = document.createElement("button");
+  syncBtn.className = "subtle sm";
+  syncBtn.textContent = "Sync";
+  syncBtn.title = "Fetch the latest peer list and CIDR config";
+  syncBtn.onclick = () => run({ fetch: { interface: iface.name } });
+  head.appendChild(syncBtn);
+
+  if (iface.is_up) {
+    const down = document.createElement("button");
+    down.className = "subtle sm";
+    down.textContent = "Bring down";
+    down.title = "Stop the interface but keep its configuration";
+    down.onclick = () => confirmDialog({
+      title: "Bring down " + iface.name + "?",
+      sub: "This stops the WireGuard interface. The configuration stays on disk, so you can bring it back up later.",
+      confirmLabel: "Bring down",
+      onConfirm: () => run({ down: { interface: iface.name } }),
+    });
+    head.appendChild(down);
+  } else {
+    const up = document.createElement("button");
+    up.className = "primary sm";
+    up.textContent = "Bring up";
+    up.onclick = () => run({ up_interface: { interface: iface.name } });
+    head.appendChild(up);
+  }
+
+  const settings = document.createElement("button");
+  settings.className = "subtle sm";
+  settings.textContent = "Settings";
+  settings.onclick = () => openNetworkSettings(iface);
+  head.appendChild(settings);
+
+  net.appendChild(head);
+
+  // tabs
+  const tab = activeTab[iface.name] || "peers";
+  const tabs = document.createElement("div");
+  tabs.className = "tabs";
+  for (const [id, label] of [["peers", "Peers"], ["cidrs", "CIDRs"], ["activity", "Activity"]]) {
+    const t = document.createElement("button");
+    t.className = "tab" + (tab === id ? " active" : "");
+    t.textContent = label;
+    t.onclick = () => { activeTab[iface.name] = id; renderMain(); };
+    tabs.appendChild(t);
+  }
+  net.appendChild(tabs);
+
+  if (tab === "peers") net.appendChild(renderPeersPanel(iface));
+  else if (tab === "cidrs") net.appendChild(renderCidrsPanel(iface));
+  else net.appendChild(renderActivityPanel());
+
+  return net;
+}
+
+function renderPeersPanel(iface) {
+  const wrap = document.createElement("div");
+
+  const list = document.createElement("div");
+  list.className = "peers";
+  const peers = (iface.peers || []).slice().sort((a, b) => {
+    if (a.is_you !== b.is_you) return a.is_you ? -1 : 1;
+    if (a.is_connected !== b.is_connected) return a.is_connected ? -1 : 1;
+    return String(a.name).localeCompare(String(b.name));
+  });
+
+  if (!peers.length) {
+    const e = document.createElement("div");
+    e.className = "state";
+    e.style.padding = "26px 18px";
+    e.innerHTML = "<p>No peers have joined yet.</p>";
+    list.appendChild(e);
+  } else {
+    for (const p of peers) list.appendChild(renderPeer(iface, p));
+  }
+  wrap.appendChild(list);
+
+  const foot = document.createElement("div");
+  foot.className = "panel-foot";
+  if (isAdmin(iface)) {
+    const add = document.createElement("button");
+    add.className = "sm";
+    add.textContent = "Invite peer…";
+    add.onclick = () => openInvitePeerDialog(iface);
+    foot.appendChild(add);
+  } else {
+    // Say why the button is missing; an unexplained gap looks like a bug.
+    const hint = document.createElement("span");
+    hint.style.cssText = "font-size:11px;color:var(--text-faint)";
+    hint.textContent = "Only network admins can invite peers.";
+    foot.appendChild(hint);
+  }
+  wrap.appendChild(foot);
+  return wrap;
+}
+
+function renderCidrsPanel(iface) {
+  const wrap = document.createElement("div");
+  const list = document.createElement("div");
+  list.className = "list";
+
+  const cidrs = iface.cidrs || [];
+  if (!cidrs.length) {
+    const e = document.createElement("div");
+    e.className = "state";
+    e.style.padding = "26px 18px";
+    e.innerHTML = "<p>No CIDRs reported.</p>";
+    list.appendChild(e);
+  } else {
+    const byId = new Map(cidrs.map((c) => [c.id, c]));
+    for (const c of cidrs) {
+      const row = document.createElement("div");
+      row.className = "list-row";
+      const parent = c.parent ? byId.get(c.parent) : null;
+      row.innerHTML =
+        '<span class="name">' + esc(c.name) + "</span>" +
+        '<span class="mono">' + esc(c.cidr) + "</span>" +
+        (parent ? '<span class="arrow">in ' + esc(parent.name) + "</span>" : "") +
+        '<div class="grow"></div>';
+      if (isAdmin(iface)) {
+        const acts = document.createElement("div");
+        acts.className = "row-actions";
+        acts.style.opacity = "1";
+        const ren = document.createElement("button");
+        ren.className = "sm subtle";
+        ren.textContent = "Rename";
+        ren.onclick = () => openRenameCidrDialog(iface, c);
+        const del = document.createElement("button");
+        del.className = "sm subtle danger";
+        del.textContent = "Delete";
+        del.onclick = () => confirmDialog({
+          title: "Delete CIDR " + c.name + "?",
+          sub: "CIDR " + c.cidr + " is removed from the network.",
+          warning: "Peers inside this CIDR lose their address. Associations that reference it are removed too.",
+          confirmLabel: "Delete CIDR",
+          danger: true,
+          onConfirm: () => run({ delete_cidr: { interface: iface.name, name: c.name } }),
+        });
+        acts.appendChild(ren);
+        acts.appendChild(del);
+        row.appendChild(acts);
+      }
+      list.appendChild(row);
+    }
+  }
+  wrap.appendChild(list);
+
+  const foot = document.createElement("div");
+  foot.className = "panel-foot";
+  if (isAdmin(iface)) {
+    const add = document.createElement("button");
+    add.className = "sm";
+    add.textContent = "Add CIDR…";
+    add.onclick = () => openAddCidrDialog(iface);
+    foot.appendChild(add);
+
+    const assoc = document.createElement("button");
+    assoc.className = "sm";
+    assoc.textContent = "Associations…";
+    assoc.onclick = () => openAssociationsDialog(iface);
+    foot.appendChild(assoc);
+  } else {
+    const hint = document.createElement("span");
+    hint.style.cssText = "font-size:11px;color:var(--text-faint)";
+    hint.textContent = "Only network admins can manage CIDRs.";
+    foot.appendChild(hint);
+  }
+  wrap.appendChild(foot);
+  return wrap;
+}
+
+function renderActivityPanel() {
+  const wrap = document.createElement("div");
+  const list = document.createElement("div");
+  list.className = "log";
+  if (!logEntries.length) {
+    const e = document.createElement("div");
+    e.className = "state";
+    e.style.padding = "26px 18px";
+    e.innerHTML = "<p>No actions yet this session.</p>";
+    list.appendChild(e);
+  } else {
+    for (const e of logEntries) {
+      const row = document.createElement("div");
+      row.className = "log-entry";
+      row.innerHTML =
+        '<span class="mark ' + (e.ok ? "ok" : "err") + '">' + (e.ok ? "✓" : "✕") + "</span>" +
+        '<span class="body"><div class="cmd">' + esc(e.command || "(no command)") + "</div>" +
+        (e.detail ? '<div class="out">' + esc(e.detail) + "</div>" : "") + "</span>";
+      list.appendChild(row);
+    }
+  }
+  wrap.appendChild(list);
+  return wrap;
+}
+
+function renderMain() {
+  mainEl.innerHTML = "";
+  const ifaces = (snapshot && snapshot.interfaces) || [];
+  if (!ifaces.length) return;
+  for (const i of ifaces) mainEl.appendChild(renderNetwork(i));
+  // an always-available activity view when there is exactly one network
+  if (ifaces.length === 1 && !(activeTab[ifaces[0].name] === "activity")) {
+    // already rendered inside tabs
+  }
+}
+
+// ---------------------------------------------------------------------------
+// dialog flows
+// ---------------------------------------------------------------------------
+
+// -- join network -----------------------------------------------------------
+async function pickInvitePath() {
+  if (selectedInvite) return selectedInvite;
+  if (openDialog) {
+    const picked = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Invitation", extensions: ["toml"] }],
+    });
+    if (picked) return Array.isArray(picked) ? picked[0] : picked;
+    return null;
+  }
+  const typed = window.prompt("Path to the invitation file (.toml):");
+  return typed && typed.trim() ? typed.trim() : null;
+}
+
+async function openJoinDialog(presetPath) {
+  const path = presetPath || (await pickInvitePath());
+  if (!path) return;
+  selectedInvite = path;
+  sessionStorage.setItem("invitePath", path);
+
+  let prev = null;
+  if (invoke) {
+    try { prev = await invoke("preview_invite", { path }); } catch (e) { prev = { ok: false, error: String(e) }; }
+  }
+
+  if (!prev || !prev.ok) {
+    showDialog({
+      title: "Cannot read invitation",
+      sub: prev && prev.error ? prev.error : "Unknown error",
+      body: '<div class="warn">Pick a different file, or check that it is a valid innernet invitation.</div>',
+      footer: [
+        { label: "Close", kind: "subtle", onClick: closeDialog },
+        { label: "Choose another…", kind: "primary", onClick: () => { closeDialog(); selectedInvite = ""; sessionStorage.removeItem("invitePath"); openJoinDialog(); } },
+      ],
+    });
+    return;
+  }
+
+  const body = document.createElement("div");
+  body.innerHTML =
+    '<div class="kv">' +
+      '<div class="kv-row"><span class="k">network</span><span class="v">' + esc(prev.network_name || "—") + "</span></div>" +
+      '<div class="kv-row"><span class="k">your address</span><span class="v">' + esc(prev.address || "—") + "</span></div>" +
+      '<div class="kv-row"><span class="k">server</span><span class="v">' + esc(prev.server_endpoint || "—") + "</span></div>" +
+      '<div class="kv-row"><span class="k">file</span><span class="v" style="word-break:break-all">' + esc(prev.path) + "</span></div>" +
+    "</div>" +
+    '<label class="checkbox"><input type="checkbox" id="delInvite" checked> Delete the invitation file after a successful install</label>' +
+    '<div class="warn">Joining writes to a root-owned directory, so you will be asked for authorisation next.</div>';
+
+  showDialog({
+    title: "Join " + (prev.network_name || "network"),
+    sub: "Review what this invitation grants before joining.",
+    body,
+    footer: [
+      { label: "Cancel", kind: "subtle", onClick: closeDialog },
+      {
+        label: "Join",
+        kind: "primary",
+        onClick: async () => {
+          const del = $("delInvite") && $("delInvite").checked;
+          closeDialog();
+          const res = await run({ install: { invite_path: prev.path, delete_invite: !!del } });
+          if (res && res.ok) {
+            selectedInvite = "";
+            sessionStorage.removeItem("invitePath");
+          }
+        },
+      },
+    ],
+  });
+}
+
+// -- network settings -------------------------------------------------------
+function openNetworkSettings(iface) {
+  const body = document.createElement("div");
+  body.innerHTML =
+    '<label class="field">Listen port' +
+      '<div style="display:flex;gap:7px;align-items:center">' +
+        '<input class="grow" id="lp" type="number" min="1" max="65535" placeholder="auto" value="' +
+          (iface.listen_port != null ? esc(iface.listen_port) : "") + '">' +
+        '<button class="sm subtle" id="lpUnset">Auto</button>' +
+      "</div>" +
+    "</label>" +
+    '<div style="font-size:11px;color:var(--text-faint)">Leave empty or press Auto to let WireGuard pick a random port.</div>' +
+    '<div class="warn">These settings affect only this machine, not the network.</div>' +
+    // Leaving the network is destructive, so it lives at the bottom of
+    // Settings, behind a red button and a confirmation.
+    '<div style="margin-top:6px;padding-top:12px;border-top:1px solid var(--line)">' +
+      '<div style="font-size:12px;font-weight:510;margin-bottom:4px">Leave this network</div>' +
+      '<div style="font-size:11.5px;color:var(--text-dim);line-height:1.5;margin-bottom:9px">' +
+        "Removes the WireGuard interface and deletes this network&rsquo;s configuration from disk. " +
+        "You would need a fresh invitation to rejoin." +
+      "</div>" +
+      '<button class="sm danger" id="leaveNet">Leave ' + esc(iface.name) + "…</button>" +
+    "</div>";
+
+  showDialog({
+    title: iface.name + " settings",
+    sub: "Local interface options.",
+    body,
+    footer: [
+      { label: "Close", kind: "subtle", onClick: closeDialog },
+      {
+        label: "Apply",
+        kind: "primary",
+        onClick: async () => {
+          const raw = ($("lp") && $("lp").value || "").trim();
+          closeDialog();
+          if (!raw) {
+            toast("Enter a port, or use Auto to randomize", "err");
+            return;
+          }
+          await run({ set_listen_port: { interface: iface.name, port: Number(raw) } });
+        },
+      },
+    ],
+  });
+
+  const unset = $("lpUnset");
+  if (unset) {
+    unset.onclick = async () => {
+      closeDialog();
+      await run({ unset_listen_port: { interface: iface.name } });
+    };
+  }
+
+  const leave = $("leaveNet");
+  if (leave) {
+    leave.onclick = () => {
+      closeDialog();
+      confirmDialog({
+        title: "Leave " + iface.name + "?",
+        sub: "The interface is removed and its configuration is deleted from this machine.",
+        warning:
+          "This cannot be undone from the app. To rejoin you need a new invitation " +
+          "from a network admin.",
+        confirmLabel: "Leave network",
+        danger: true,
+        onConfirm: () => run({ uninstall: { interface: iface.name } }),
+      });
+    };
+  }
+}
+
+// -- endpoint overrides -----------------------------------------------------
+function openEndpointDialog(iface, me) {
+  const existing = (iface.endpoint_overrides || [])[0];
+  const body = document.createElement("div");
+  body.innerHTML =
+    '<label class="field">External endpoint the server advertises for you' +
+      '<input id="ep" placeholder="1.2.3.4:51820" value="' + esc(existing ? existing.endpoint : "") + '">' +
+    "</label>" +
+    '<div class="hint" style="padding:0;font-size:11px;color:var(--text-faint)">' +
+      "Set this when automatic endpoint discovery fails, e.g. behind a NAT you cannot control.</div>";
+
+  showDialog({
+    title: "Publish endpoint",
+    sub: "Override the address other peers use to reach this device.",
+    body,
+    footer: [
+      { label: "Cancel", kind: "subtle", onClick: closeDialog },
+      {
+        label: "Clear", kind: "subtle danger",
+        onClick: async () => { closeDialog(); await run({ unset_endpoint: { interface: iface.name } }); },
+      },
+      {
+        label: "Save", kind: "primary",
+        onClick: async () => {
+          const v = ($("ep") && $("ep").value || "").trim();
+          closeDialog();
+          if (!v) { toast("Enter an endpoint like 1.2.3.4:51820", "err"); return; }
+          await run({ override_endpoint: { interface: iface.name, endpoint: v } });
+        },
+      },
+    ],
+  });
+}
+
+function openPeerEndpointDialog(iface, peer) {
+  const body = document.createElement("div");
+  body.innerHTML =
+    '<label class="field">Endpoint to use for ' + esc(peer.name) +
+      '<input id="pep" placeholder="10.0.0.2:51820" value="' +
+        esc(peer.endpoint || "") + '">' +
+    "</label>" +
+    '<div class="hint" style="padding:0;font-size:11px;color:var(--text-faint)">' +
+      "Overrides the address this machine dials for that peer. Useful when NAT traversal fails for one peer.</div>";
+
+  showDialog({
+    title: "Endpoint for " + peer.name,
+    sub: peer.ip,
+    body,
+    footer: [
+      { label: "Cancel", kind: "subtle", onClick: closeDialog },
+      {
+        label: "Clear", kind: "subtle danger",
+        onClick: async () => {
+          closeDialog();
+          await run({ unset_peer_endpoint: { interface: iface.name, peer: peer.name } });
+        },
+      },
+      {
+        label: "Save", kind: "primary",
+        onClick: async () => {
+          const v = ($("pep") && $("pep").value || "").trim();
+          closeDialog();
+          if (!v) { toast("Enter an endpoint like 1.2.3.4:51820", "err"); return; }
+          await run({ override_peer_endpoint: { interface: iface.name, peer: peer.name, endpoint: v } });
+        },
+      },
+    ],
+  });
+}
+
+// -- peer routes (informational; editing goes through add-peer) --------------
+function openPeerRoutesDialog(iface, peer) {
+  const routes = peer.allowed_subnets || [];
+  const body = document.createElement("div");
+  body.innerHTML = routes.length
+    ? '<div class="kv">' + routes.map((r) =>
+        '<div class="kv-row"><span class="k">subnet</span><span class="v">' + esc(r) + "</span></div>").join("") + "</div>"
+    : '<div class="hint" style="padding:0;color:var(--text-faint);font-size:12px">This peer does not route any subnets.</div>';
+  body.insertAdjacentHTML("beforeend",
+    '<div class="hint" style="padding:0;margin-top:8px;font-size:11px;color:var(--text-faint)">' +
+    "Subnet routes are declared when a peer joins. To change them, re-add the peer with the new routes, or edit them with the CLI (`add-peer --advertise-routes`).</div>");
+
+  showDialog({
+    title: "Routes for " + peer.name,
+    sub: peer.ip,
+    body,
+    footer: [{ label: "Close", kind: "subtle", onClick: closeDialog }],
+  });
+}
+
+function openRenamePeerDialog(iface, peer) {
+  const body = document.createElement("div");
+  body.innerHTML = '<label class="field">New name<input id="rn" value="' + esc(peer.name) + '"></label>';
+  showDialog({
+    title: "Rename peer",
+    sub: "Currently " + peer.name + " (" + peer.ip + ")",
+    body,
+    footer: [
+      { label: "Cancel", kind: "subtle", onClick: closeDialog },
+      {
+        label: "Rename", kind: "primary",
+        onClick: async () => {
+          const v = ($("rn") && $("rn").value || "").trim();
+          closeDialog();
+          if (!v || v === peer.name) return;
+          await run({ rename_peer: { interface: iface.name, name: peer.name, new_name: v } });
+        },
+      },
+    ],
+  });
+}
+
+// -- invite a new peer ------------------------------------------------------
+function openInvitePeerDialog(iface) {
+  const cidrs = (iface.cidrs || []).filter((c) => c.name !== "innernet-server");
+  const opts = cidrs.map((c) =>
+    '<option value="' + esc(c.name) + '">' + esc(c.name) + " (" + esc(c.cidr) + ")</option>").join("");
+
+  const body = document.createElement("div");
+  body.innerHTML =
+    '<div class="grid2">' +
+      '<label class="field">Peer name<input id="pn" placeholder="laptop" autofocus></label>' +
+      '<label class="field">CIDR<select id="pc">' + opts + "</select></label>" +
+    "</div>" +
+    '<label class="checkbox"><input type="checkbox" id="pauto" checked> Assign an address automatically</label>' +
+    '<label class="field" id="ipWrap" style="display:none">Address<input id="pip" placeholder="10.60.1.9"></label>' +
+    '<label class="checkbox"><input type="checkbox" id="padmin"> Grant admin rights</label>' +
+    '<label class="field">Routed subnets (comma separated, optional)' +
+      '<input id="proutes" placeholder="192.168.31.0/24"></label>' +
+    '<div class="warn">The invitation file contains a private key. Deliver it to the peer over a channel you trust, then delete it.</div>';
+
+  showDialog({
+    title: "Invite a peer",
+    sub: "Generate a one-time invitation for a new device.",
+    body,
+    footer: [
+      { label: "Cancel", kind: "subtle", onClick: closeDialog },
+      { label: "Generate…", kind: "primary", onClick: () => generateInvite(iface) },
+    ],
+  });
+
+  const auto = $("pauto");
+  if (auto) {
+    auto.onchange = () => {
+      const w = $("ipWrap");
+      if (w) w.style.display = auto.checked ? "none" : "";
+    };
+  }
+}
+
+async function generateInvite(iface) {
+  const name = ($("pn") && $("pn").value || "").trim();
+  const cidr = ($("pc") && $("pc").value || "").trim();
+  const autoIp = $("pauto") ? $("pauto").checked : true;
+  const ip = ($("pip") && $("pip").value || "").trim();
+  const admin = $("padmin") ? $("padmin").checked : false;
+  const routesRaw = ($("proutes") && $("proutes").value || "").trim();
+
+  if (!name) { toast("Enter a peer name", "err"); return; }
+
+  // Ask where to save before generating: the CLI writes the invitation.
+  let savePath = "";
+  if (openDialog && TAURI.core && TAURI.core.invoke) {
+    try {
+      // Tauri's save dialog is in the dialog plugin; fall back to a path prompt.
+      if (TAURI.dialog && TAURI.dialog.save) {
+        savePath = await TAURI.dialog.save({
+          defaultPath: name + ".toml",
+          filters: [{ name: "Invitation", extensions: ["toml"] }],
+        }) || "";
+      }
+    } catch (e) { /* fall through to prompt */ }
+  }
+  if (!savePath) {
+    const homeish = (snapshot && snapshot.config_dir) ? "" : "";
+    savePath = window.prompt("Save the invitation to:", name + ".toml");
+    if (!savePath) return;
+  }
+
+  closeDialog();
+  const routes = routesRaw ? routesRaw.split(",").map((s) => s.trim()).filter(Boolean) : [];
+  const res = await run({
+    add_peer: {
+      interface: iface.name,
+      name,
+      cidr: cidr || null,
+      auto_ip: autoIp,
+      ip: autoIp ? null : (ip || null),
+      admin,
+      save_config: savePath,
+      advertise_routes: routes,
+    },
+  });
+
+  if (res && res.ok) {
+    showDialog({
+      title: "Invitation created",
+      sub: name + " can now join " + iface.name + ".",
+      body:
+        '<div class="kv"><div class="kv-row"><span class="k">saved to</span>' +
+        '<span class="v" style="word-break:break-all">' + esc(savePath) + "</span></div></div>" +
+        '<div class="warn">Send this file to the device over a trusted channel, then delete it. ' +
+        "It contains the peer&rsquo;s private key and can be used only once.</div>",
+      footer: [
+        { label: "Reveal in Finder", kind: "subtle", onClick: () => run({ fetch: { interface: iface.name } }, { quiet: true }) },
+        { label: "Done", kind: "primary", onClick: closeDialog },
+      ],
+    });
+  }
+}
+
+// -- CIDR management --------------------------------------------------------
+function openAddCidrDialog(iface) {
+  const parents = (iface.cidrs || []).map((c) =>
+    '<option value="' + esc(c.name) + '">' + esc(c.name) + "</option>").join("");
+  const body = document.createElement("div");
+  body.innerHTML =
+    '<div class="grid2">' +
+      '<label class="field">Name<input id="cn" placeholder="engineers"></label>' +
+      '<label class="field">Range<input id="cc" placeholder="10.60.5.0/24"></label>' +
+    "</div>" +
+    '<label class="field">Parent CIDR<select id="cp"><option value="">(none)</option>' + parents + "</select></label>" +
+    '<div class="hint" style="padding:0;font-size:11px;color:var(--text-faint)">' +
+      "A CIDR groups peers. Peers in different CIDRs cannot reach each other unless you add an association.</div>";
+
+  showDialog({
+    title: "Add CIDR",
+    sub: iface.name,
+    body,
+    footer: [
+      { label: "Cancel", kind: "subtle", onClick: closeDialog },
+      {
+        label: "Add", kind: "primary",
+        onClick: async () => {
+          const name = ($("cn") && $("cn").value || "").trim();
+          const cidr = ($("cc") && $("cc").value || "").trim();
+          const parent = ($("cp") && $("cp").value || "").trim();
+          closeDialog();
+          if (!name || !cidr) { toast("Name and range are required", "err"); return; }
+          await run({ add_cidr: { interface: iface.name, name, cidr, parent: parent || null } });
+        },
+      },
+    ],
+  });
+}
+
+function openRenameCidrDialog(iface, c) {
+  const body = document.createElement("div");
+  body.innerHTML = '<label class="field">New name<input id="rcn" value="' + esc(c.name) + '"></label>';
+  showDialog({
+    title: "Rename CIDR",
+    sub: c.cidr,
+    body,
+    footer: [
+      { label: "Cancel", kind: "subtle", onClick: closeDialog },
+      {
+        label: "Rename", kind: "primary",
+        onClick: async () => {
+          const v = ($("rcn") && $("rcn").value || "").trim();
+          closeDialog();
+          if (!v || v === c.name) return;
+          await run({ rename_cidr: { interface: iface.name, name: c.name, new_name: v } });
+        },
+      },
+    ],
+  });
+}
+
+function openAssociationsDialog(iface) {
+  const cidrs = iface.cidrs || [];
+  const opts = cidrs.map((c) =>
+    '<option value="' + esc(c.name) + '">' + esc(c.name) + "</option>").join("");
+
+  const body = document.createElement("div");
+  body.innerHTML =
+    '<div class="hint" style="padding:0;font-size:12px;color:var(--text-dim)">' +
+      "By default peers can only reach peers in their own CIDR. An association opens traffic between two CIDRs in both directions.</div>" +
+    '<div class="grid2">' +
+      '<label class="field">CIDR A<select id="ca">' + opts + "</select></label>" +
+      '<label class="field">CIDR B<select id="cb">' + opts + "</select></label>" +
+    "</div>";
+
+  showDialog({
+    title: "Associations",
+    sub: iface.name,
+    body,
+    footer: [
+      { label: "Close", kind: "subtle", onClick: closeDialog },
+      {
+        label: "Remove", kind: "subtle danger",
+        onClick: async () => {
+          const a = $("ca") && $("ca").value, b = $("cb") && $("cb").value;
+          closeDialog();
+          if (!a || !b || a === b) { toast("Pick two different CIDRs", "err"); return; }
+          await run({ delete_association: { interface: iface.name, cidr1: a, cidr2: b } });
+        },
+      },
+      {
+        label: "Allow", kind: "primary",
+        onClick: async () => {
+          const a = $("ca") && $("ca").value, b = $("cb") && $("cb").value;
+          closeDialog();
+          if (!a || !b || a === b) { toast("Pick two different CIDRs", "err"); return; }
+          await run({ add_association: { interface: iface.name, cidr1: a, cidr2: b } });
+        },
+      },
+    ],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// data flow
+// ---------------------------------------------------------------------------
+function renderError(state) {
+  const needsPriv = !!state.needs_privileges;
+  setStatus("off", needsPriv ? "no permission" : "error");
+  renderState({
+    kind: "err",
+    title: needsPriv ? "Permission required" : "Could not read state",
+    body: needsPriv
+      ? "innernet keeps its configuration in a root-owned directory. Grant access with the button below; you will be asked to authorise once."
+      : (state.error || "The innernet CLI returned something unexpected."),
+    detail: state.error && needsPriv ? state.error : (state.binary ? "cli: " + state.binary : null),
+    actions: needsPriv
+      ? [
+          { label: "Authorise…", kind: "primary", onClick: () => run({ up: {} }) },
+          { label: "Retry", onClick: load },
+        ]
+      : [{ label: "Retry", kind: "primary", onClick: load }],
+  });
+}
+
+function renderEmpty(snap) {
+  setStatus("", "no networks");
+  renderState({
+    kind: "empty",
+    title: "No networks yet",
+    body: "This device has not joined an innernet network. Start from an invitation file someone sent you.",
+    detail: snap && snap.config_dir ? "config dir: " + snap.config_dir : null,
+    actions: [
+      { label: "Join network…", kind: "primary", onClick: () => openJoinDialog() },
+      { label: "Check again", onClick: load },
+    ],
+  });
+}
+
+async function load() {
+  if (busy) return;
+
+  if (!invoke) {
+    setStatus("off", "bad runtime");
+    renderState({
+      kind: "err",
+      title: "Application bridge unavailable",
+      body: "The window loaded without the Tauri bridge, so it cannot talk to the backend.",
+      detail: "window.__TAURI__ = " + (TAURI ? "present" : "undefined"),
+    });
+    return;
+  }
+
+  setBusy(true);
+  if (!snapshot) skeleton();
+
+  try {
+    const state = await invoke("get_state");
+    if (state && state.ok) {
+      const prevCount = snapshot ? snapshot.interfaces.length : -1;
+      snapshot = state.snapshot;
+      const ifaces = (snapshot && snapshot.interfaces) || [];
+      const connected = ifaces.flatMap((i) => i.peers || [])
+        .filter((p) => p.is_connected && !p.is_you).length;
+      const anyUp = ifaces.some((i) => i.is_up);
+
+      if (!ifaces.length) {
+        setRoleChip(null);
+        renderEmpty(snapshot);
+      } else {
+        // With several networks the chip reflects the strictest role, so the
+        // user never assumes admin rights they lack on some interface.
+        const roles = ifaces.map(roleOf);
+        const role = roles.every((r) => r === "admin") ? "admin"
+          : roles.includes("disabled") ? "disabled"
+          : "member";
+        setRoleChip(role === "disabled" ? "member" : role);
+
+        setStatus(anyUp ? "on" : "off",
+          (anyUp ? "connected" : "down") + " · " + connected +
+          " peer" + (connected === 1 ? "" : "s"));
+        renderMain();
+      }
+    } else {
+      snapshot = (state && state.snapshot) || null;
+      renderError(state || { ok: false, error: "empty response" });
+    }
+  } catch (e) {
+    setStatus("off", "error");
+    renderError({ ok: false, error: String(e && e.message ? e.message : e) });
+  } finally {
+    setBusy(false);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// boot
+// ---------------------------------------------------------------------------
+refreshBtn.onclick = load;
+joinBtn.onclick = () => openJoinDialog();
+
+skeleton();
+load();
+
+// If an invitation path was passed on the command line or kept from last time,
+// offer to join with it as soon as state loads.
+(async () => {
+  await new Promise((r) => setTimeout(r, 300));
+  if (selectedInvite && snapshot && (!snapshot.interfaces || !snapshot.interfaces.length)) {
+    await openJoinDialog(selectedInvite);
+  }
+})();
+
+setInterval(() => { if (!busy && !document.hidden) load(); }, 15000);
+</script>
+</body>
+</html>

@@ -8,6 +8,7 @@ pub struct NewPeerInfo {
     pub cidr_id: i64,
     pub is_admin: bool,
     pub invite_expires: Timestring,
+    pub allowed_subnets: Vec<ipnet::IpNet>,
 }
 
 impl NewPeerInfo {
@@ -24,6 +25,7 @@ impl NewPeerInfo {
             persistent_keepalive_interval: Some(PERSISTENT_KEEPALIVE_INTERVAL_SECS),
             invite_expires: Some(SystemTime::now() + self.invite_expires.into()),
             candidates: vec![],
+            allowed_subnets: self.allowed_subnets,
         }
     }
 }

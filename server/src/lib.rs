@@ -35,6 +35,7 @@ use wireguard_control::{
 mod api;
 mod db;
 mod error;
+mod web;
 pub mod initialize;
 #[cfg(test)]
 mod test;
@@ -468,6 +469,7 @@ pub async fn serve(
     conf: &ServerConfig,
     network: NetworkOpts,
     hosts_opts: HostsOpts,
+    web_listen: String,
 ) -> Result<(), Error> {
     let config = ConfigFile::from_file(conf.config_path(&interface))?;
     log::debug!("opening database connection...");
@@ -517,6 +519,20 @@ pub async fn serve(
         num_candidates
     );
 
+    // Seed a web admin account on first run and print the generated password once.
+    if let Some(password) = web::ensure_default_account(&conn)? {
+        println!();
+        println!("  ┌──────────────────────────────────────────────────────┐");
+        println!("  │ web admin UI enabled                                 │");
+        println!("  │   url      : http://{web_listen}/web                 │");
+        println!("  │   username : admin                                   │");
+        println!("  │   password : {password:<40}│");
+        println!("  └──────────────────────────────────────────────────────┘");
+        println!("  This password is shown once and stored hashed. Change it");
+        println!("  by deleting the row from web_accounts and restarting.");
+        println!();
+    }
+
     let public_key = wireguard_control::Key::from_base64(&config.private_key)?.get_public();
     let db = Arc::new(Mutex::new(conn));
     let endpoints = spawn_endpoint_refresher(interface, network);
@@ -537,6 +553,36 @@ pub async fn serve(
     log::info!("innernet-server {} starting.", VERSION);
 
     let listener = get_listener((config.address, config.listen_port).into(), &interface)?;
+
+    // Optional web admin UI listener, separate from the WireGuard-internal API.
+    if !web_listen.trim().is_empty() {
+        let web_addr: SocketAddr = web_listen
+            .parse()
+            .map_err(|_| anyhow!("invalid --web-listen address: {web_listen}"))?;
+        let web_context = context.clone();
+        let web_listener = TcpListener::bind(web_addr)
+            .map_err(|e| anyhow!("failed to bind web UI on {web_addr}: {e}"))?;
+        web_listener.set_nonblocking(true)?;
+        log::info!("web admin UI listening on http://{web_addr}/web");
+
+        tokio::spawn(async move {
+            let make_web = hyper::service::make_service_fn(move |socket: &AddrStream| {
+                let remote_addr = socket.remote_addr();
+                let context = web_context.clone();
+                async move {
+                    Ok::<_, http::Error>(hyper::service::service_fn(move |req: Request<Body>| {
+                        log::debug!("web {} - {} {}", &remote_addr, req.method(), req.uri());
+                        hyper_service(req, context.clone(), remote_addr)
+                    }))
+                }
+            });
+            if let Ok(srv) = hyper::Server::from_tcp(web_listener) {
+                if let Err(e) = srv.serve(make_web).await {
+                    log::error!("web UI server stopped: {e}");
+                }
+            }
+        });
+    }
 
     let make_svc = hyper::service::make_service_fn(move |socket: &AddrStream| {
         let remote_addr = socket.remote_addr();
@@ -589,6 +635,18 @@ pub(crate) async fn hyper_service(
     context: Context,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, http::Error> {
+    // The web admin UI lives outside the versioned API namespace and
+    // authenticates with a password cookie instead of a WireGuard key.
+    if web::is_web_path(req.uri().path()) {
+        // The web handler needs the DB; take the lock inside a scope that does
+        // not hold a reference across an await point so the future stays Send.
+        let outcome = web::handle(req, remote_addr, context.clone()).await;
+        return match outcome {
+            web::WebOutcome::Handled(response) => Ok(response),
+            web::WebOutcome::PassThrough => Err(ServerError::NotFound).or_else(TryInto::try_into),
+        };
+    }
+
     // Break the path into components.
     let components: VecDeque<_> = req
         .uri()

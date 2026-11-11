@@ -68,6 +68,16 @@ mod handlers {
         let mut peer = DatabasePeer::get(&conn, id)?;
         peer.update(&conn, form)?;
 
+        // Push the change to the live WireGuard interface so updates (notably
+        // allowed_subnets) take effect immediately instead of after a restart.
+        if cfg!(not(test)) {
+            DeviceUpdate::new()
+                .add_peer(PeerConfigBuilder::from(&*peer))
+                .apply(&session.context.interface, session.context.backend)
+                .map_err(|_| ServerError::WireGuard)?;
+            log::info!("updated WireGuard interface for peer {}", &*peer);
+        }
+
         status_response(StatusCode::NO_CONTENT)
     }
 
@@ -95,7 +105,8 @@ mod tests {
     use super::*;
     use crate::test;
     use bytes::Buf;
-    use innernet_shared::{Error, Peer};
+    use innernet_shared::{Error, Peer, PeerDiff};
+    use ipnet::IpNet;
 
     #[tokio::test]
     async fn test_add_peer() -> Result<(), Error> {
@@ -223,6 +234,56 @@ mod tests {
             .await;
 
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_advertise_subnet_routes_via_admin_api() -> Result<(), Error> {
+        let server = test::Server::new()?;
+
+        // A peer that routes an external subnet must expose it as an allowed-ip,
+        // so other peers know to send matching traffic through it.
+        let mut peer = DatabasePeer::get(&server.db.lock(), test::DEVELOPER1_PEER_ID)?;
+        let contents = PeerContents {
+            allowed_subnets: vec!["192.168.31.0/24".parse().unwrap()],
+            ..peer.contents.clone()
+        };
+        peer.update(&server.db.lock(), contents)?;
+
+        let reloaded = DatabasePeer::get(&server.db.lock(), test::DEVELOPER1_PEER_ID)?;
+        assert_eq!(
+            reloaded.contents.allowed_subnets,
+            vec!["192.168.31.0/24".parse::<IpNet>().unwrap()],
+            "allowed_subnets should round-trip through SQLite"
+        );
+
+        // The peer's WireGuard config must advertise peer IP + the routed subnet.
+        let diff = PeerDiff::new(None, Some(&reloaded.inner))
+            .expect("diff computation failed")
+            .expect("expected a diff");
+        let config = diff.peer_config();
+        let allowed: Vec<(String, u8)> = config
+            .allowed_ips
+            .iter()
+            .map(|a| (a.address.to_string(), a.cidr))
+            .collect();
+        assert!(
+            allowed.contains(&("192.168.31.0".to_string(), 24)),
+            "subnet missing from allowed-ips: {allowed:?}"
+        );
+
+        // Disabling the peer must revoke the routes (empty allowed-ips => removal).
+        peer.contents.is_disabled = true;
+        let diff = PeerDiff::new(None, Some(&peer.inner))
+            .expect("diff computation failed")
+            .expect("expected a diff");
+        let config = diff.peer_config();
+        assert!(
+            config.allowed_ips.is_empty(),
+            "disabled peer must not keep subnet routes: {:?}",
+            config.allowed_ips
+        );
 
         Ok(())
     }

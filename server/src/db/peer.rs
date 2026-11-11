@@ -22,6 +22,7 @@ pub static CREATE_TABLE_SQL: &str = "CREATE TABLE peers (
       is_redeemed     INTEGER DEFAULT 0 NOT NULL,   /* Has the peer redeemed their invite yet?                          */
       invite_expires  INTEGER,                      /* The UNIX time that an invited peer can no longer redeem.         */
       candidates      TEXT,                         /* A list of additional endpoints that peers can use to connect.    */
+      allowed_subnets TEXT NOT NULL DEFAULT '[]', /* JSON array of subnets routed through this peer (subnet router). */
       FOREIGN KEY (cidr_id)
          REFERENCES cidrs (id)
             ON UPDATE RESTRICT
@@ -40,6 +41,7 @@ pub static COLUMNS: &[&str] = &[
     "is_redeemed",
     "invite_expires",
     "candidates",
+    "allowed_subnets",
 ];
 
 /// Regex to match the requirements of hostname(7), needed to have peers also be reachable hostnames.
@@ -84,6 +86,7 @@ impl DatabasePeer {
             is_redeemed,
             invite_expires,
             candidates,
+            allowed_subnets,
             ..
         } = &contents;
         log::info!("creating peer {:?}", contents);
@@ -116,7 +119,7 @@ impl DatabasePeer {
 
         conn.execute(
             &format!(
-                "INSERT INTO peers ({}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO peers ({}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 COLUMNS[1..].join(", ")
             ),
             params![
@@ -130,6 +133,7 @@ impl DatabasePeer {
                 is_redeemed,
                 invite_expires,
                 candidates,
+                serde_json::to_string(allowed_subnets)?,
             ],
         )?;
         let id = conn.last_insert_rowid();
@@ -158,17 +162,20 @@ impl DatabasePeer {
             is_admin: contents.is_admin,
             is_disabled: contents.is_disabled,
             candidates: contents.candidates,
+            allowed_subnets: contents.allowed_subnets,
             ..self.contents.clone()
         };
 
         let new_candidates = serde_json::to_string(&new_contents.candidates)?;
+        let new_allowed_subnets = serde_json::to_string(&new_contents.allowed_subnets)?;
         conn.execute(
             "UPDATE peers SET
                 name = ?2,
                 endpoint = ?3,
                 is_admin = ?4,
                 is_disabled = ?5,
-                candidates = ?6
+                candidates = ?6,
+                allowed_subnets = ?7
             WHERE id = ?1",
             params![
                 self.id,
@@ -180,6 +187,7 @@ impl DatabasePeer {
                 new_contents.is_admin,
                 new_contents.is_disabled,
                 new_candidates,
+                new_allowed_subnets,
             ],
         )?;
 
@@ -249,6 +257,15 @@ impl DatabasePeer {
             vec![]
         };
 
+        // Older rows (added via ALTER TABLE ... DEFAULT '[]') may hold an empty
+        // string instead of the JSON literal, so treat blank values as "no subnets".
+        let allowed_subnets = match row.get::<_, Option<String>>(11)? {
+            Some(json) if !json.trim().is_empty() => serde_json::from_str(&json).map_err(|_| {
+                rusqlite::Error::InvalidColumnType(11, "allowed_subnets (json)".into(), Type::Text)
+            })?,
+            _ => vec![],
+        };
+
         let persistent_keepalive_interval = Some(PERSISTENT_KEEPALIVE_INTERVAL_SECS);
 
         Ok(Peer {
@@ -265,6 +282,7 @@ impl DatabasePeer {
                 is_redeemed,
                 invite_expires,
                 candidates,
+                allowed_subnets,
             },
         }
         .into())

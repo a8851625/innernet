@@ -31,6 +31,7 @@ fn main() -> Result<(), Error> {
         cidr_id: cidrs[0].id,
         is_admin: false,
         invite_expires: "1m".parse().unwrap(),
+        allowed_subnets: vec![],
     };
 
     let target_path = "invitation.toml";

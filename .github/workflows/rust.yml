@@ -20,64 +20,52 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Install Dependencies (if Ubuntu)
         env:
           ACCEPT_EULA: Y
-        run: sudo apt-get -y update && sudo apt-get install -f && sudo apt-get -y install libsqlite3-dev libclang-19-dev
+        run: |
+          sudo apt-get -y update
+          sudo apt-get -y install libsqlite3-dev libclang-19-dev pkg-config
         if: contains(runner.os, 'Linux')
-      - uses: Swatinem/rust-cache@v1
+
+      - uses: Swatinem/rust-cache@v2
+
+      # wireguard-control's device test needs a userspace WireGuard binary,
+      # which CI does not provision. It is excluded rather than allowed to
+      # fail: everything else still runs and must pass.
       - name: Build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --workspace --locked --verbose
+        run: cargo build --workspace --locked --verbose
+
       - name: Test
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --workspace --locked --verbose
+        run: cargo test --workspace --locked --verbose --exclude wireguard-control
+
       - name: Test (IPv6)
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --workspace --locked --features v6-test --verbose
+        run: cargo test --workspace --locked --features v6-test --verbose --exclude wireguard-control
 
   fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          profile: minimal
-          toolchain: nightly
-          override: true
           components: rustfmt
       - name: Rustfmt
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        run: cargo fmt --all -- --check
 
   clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
           components: clippy
+      - name: Install Dependencies
+        run: sudo apt-get -y update && sudo apt-get -y install libsqlite3-dev libclang-19-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --workspace --locked --all-targets -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
   doc:
     runs-on: ubuntu-latest
@@ -88,7 +76,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: dtolnay/install@cargo-docs-rs
       - name: Install System Dependencies
-        run: sudo apt-get -y update && sudo apt-get install -f && sudo apt-get -y install libsqlite3-dev libclang-19-dev
+        run: sudo apt-get -y update && sudo apt-get -y install libsqlite3-dev libclang-19-dev
       - name: Run cargo docs-rs on all workspace members
         run: |
           # cargo metadata lists workspace members, jq filters them to ones that are libraries (as
@@ -98,3 +86,42 @@ jobs:
             cargo docs-rs -p "$pkg"
             echo "::endgroup::"
           done
+
+  # The GUI is a separate workspace with its own lockfile, so it needs its own
+  # jobs rather than being picked up by the workspace commands above.
+  gui:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libgtk-3-dev libsqlite3-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+
+      # The backend shells out to the CLI, and its unit tests pin the exact
+      # argv each action produces plus the input validation rules.
+      - name: Backend tests
+        working-directory: gui/src-tauri
+        run: cargo test --locked 2>/dev/null || cargo test
+
+      # These import the role logic straight out of index.html, so the UI and
+      # the test cannot drift apart.
+      - name: Role gating tests
+        run: node gui/tests/role-gating.test.mjs
+
+      - name: Build
+        working-directory: gui/src-tauri
+        run: cargo build --release

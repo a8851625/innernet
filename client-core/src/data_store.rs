@@ -175,6 +175,7 @@ mod tests {
                 persistent_keepalive_interval: None,
                 invite_expires: None,
                 candidates: vec![],
+                allowed_subnets: vec![],
             },
         }]
     });

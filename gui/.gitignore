@@ -1,0 +1,7 @@
+# Tauri regenerates these from tauri.conf.json on every build.
+src-tauri/gen/schemas/
+
+# Build output (the repo-level .gitignore covers target/ but not nested ones
+# created by tools running with a different cwd).
+src-tauri/target/
+node_modules/

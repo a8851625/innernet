@@ -1,0 +1,212 @@
+name: Release
+
+# Builds every deliverable artefact across platforms and attaches them to a
+# GitHub Release. Binaries are built on native runners instead of being
+# cross-compiled, because innernet links against the platform's WireGuard and
+# SQLite interfaces and a cross build would not prove either works.
+#
+# Trigger by pushing a tag (v1.2.3), or run manually to get the artefacts
+# without publishing a release.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a GitHub Release (only applies to tags)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep the workspace test binary from being built twice.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # CLI + server for Linux, macOS and Windows.
+  # ---------------------------------------------------------------------------
+  cli-server:
+    name: cli+server (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p innernet -p innernet-server
+
+      - name: Stage artefacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="dist/innernet-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
+          mkdir -p "$out"
+          ext=""
+          if [ "${{ runner.os }}" = "Windows" ]; then ext=".exe"; fi
+          cp "target/${{ matrix.target }}/release/innernet${ext}" "$out/"
+          cp "target/${{ matrix.target }}/release/innernet-server${ext}" "$out/"
+          cp README.md LICENSE "$out/" 2>/dev/null || true
+          # Man pages and completions only make sense on unix-like targets.
+          if [ -d doc ] && [ "${{ runner.os }}" != "Windows" ]; then
+            cp -R doc "$out/" || true
+          fi
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "${out}.zip" "$out" > /dev/null
+          else
+            tar -czf "${out}.tar.gz" "$out"
+          fi
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: innernet-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Desktop GUI. Tauri needs the platform webview, so each OS builds its own.
+  # ---------------------------------------------------------------------------
+  gui:
+    name: gui (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos-aarch64
+            rust_target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - os: macos-latest
+            platform: macos-x86_64
+            rust_target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            rust_target: ""
+            args: ""
+          - os: windows-latest
+            platform: windows-x86_64
+            rust_target: ""
+            args: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Cross-building macOS on the same runner needs the target installed;
+          # other platforms build for their own default target.
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libsqlite3-dev
+
+      # The GUI shells out to the CLI, but it also reads `show --json`, so tests
+      # exercise the real parser.
+      - name: Unit tests
+        working-directory: gui/src-tauri
+        run: cargo test --release
+
+      - name: Role gating tests
+        run: node gui/tests/role-gating.test.mjs
+
+      - name: Build GUI
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: gui
+          args: ${{ matrix.args }}
+          # Only attach to a release when this run is for a tag.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('innernet {0}', github.ref_name) || '' }}
+          releaseDraft: true
+          prerelease: false
+
+      - name: Collect bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find gui/src-tauri/target -maxdepth 4 -type f \
+            \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.msi" -o -name "*.exe" \
+               -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" \) \
+            -exec cp {} dist/ \; 2>/dev/null || true
+          ls -lh dist/ || echo "no bundles found"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: innernet-gui-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Wheel of the whole workspace: catches breakage that platform builds miss.
+  # ---------------------------------------------------------------------------
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

@@ -1,0 +1,5 @@
+# The GUI is a separate workspace; pin the toolchain so a contributor's default
+# does not silently differ from CI.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
