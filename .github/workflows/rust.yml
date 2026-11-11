@@ -115,7 +115,7 @@ jobs:
       # argv each action produces plus the input validation rules.
       - name: Backend tests
         working-directory: gui/src-tauri
-        run: cargo test --locked 2>/dev/null || cargo test
+        run: cargo test --locked
 
       # These import the role logic straight out of index.html, so the UI and
       # the test cannot drift apart.

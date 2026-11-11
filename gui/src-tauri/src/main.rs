@@ -247,13 +247,21 @@ enum Action {
     /// Bring every interface up and refresh peers.
     Up,
     /// Bring one interface up / refresh its config.
-    UpInterface { interface: String },
+    UpInterface {
+        interface: String,
+    },
     /// Fetch the peer list once.
-    Fetch { interface: String },
+    Fetch {
+        interface: String,
+    },
     /// Bring the interface down but KEEP the configuration.
-    Down { interface: String },
+    Down {
+        interface: String,
+    },
     /// Remove the interface and delete its configuration.
-    Uninstall { interface: String },
+    Uninstall {
+        interface: String,
+    },
     /// Join a network from an invitation file.
     Install {
         invite_path: String,
@@ -263,16 +271,29 @@ enum Action {
     },
 
     // -- local settings ----------------------------------------------------
-    SetListenPort { interface: String, port: u16 },
-    UnsetListenPort { interface: String },
-    OverrideEndpoint { interface: String, endpoint: String },
-    UnsetEndpoint { interface: String },
+    SetListenPort {
+        interface: String,
+        port: u16,
+    },
+    UnsetListenPort {
+        interface: String,
+    },
+    OverrideEndpoint {
+        interface: String,
+        endpoint: String,
+    },
+    UnsetEndpoint {
+        interface: String,
+    },
     OverridePeerEndpoint {
         interface: String,
         peer: String,
         endpoint: String,
     },
-    UnsetPeerEndpoint { interface: String, peer: String },
+    UnsetPeerEndpoint {
+        interface: String,
+        peer: String,
+    },
 
     // -- server-side peer management (requires admin) ----------------------
     AddPeer {
@@ -291,8 +312,14 @@ enum Action {
         #[serde(default)]
         advertise_routes: Vec<String>,
     },
-    DisablePeer { interface: String, name: String },
-    EnablePeer { interface: String, name: String },
+    DisablePeer {
+        interface: String,
+        name: String,
+    },
+    EnablePeer {
+        interface: String,
+        name: String,
+    },
     RenamePeer {
         interface: String,
         name: String,
@@ -311,7 +338,10 @@ enum Action {
         name: String,
         new_name: String,
     },
-    DeleteCidr { interface: String, name: String },
+    DeleteCidr {
+        interface: String,
+        name: String,
+    },
     AddAssociation {
         interface: String,
         cidr1: String,
@@ -333,20 +363,20 @@ impl Action {
             Action::UpInterface { interface } => {
                 a.push("up".into());
                 a.push(validate_interface(interface)?);
-            }
+            },
             Action::Fetch { interface } => {
                 a.push("fetch".into());
                 a.push(validate_interface(interface)?);
-            }
+            },
             Action::Down { interface } => {
                 a.push("down".into());
                 a.push(validate_interface(interface)?);
-            }
+            },
             Action::Uninstall { interface } => {
                 a.push("uninstall".into());
                 a.push(validate_interface(interface)?);
                 a.push("--yes".into());
-            }
+            },
             Action::Install {
                 invite_path,
                 delete_invite,
@@ -359,7 +389,7 @@ impl Action {
                 if *delete_invite {
                     a.push("--delete-invite".into());
                 }
-            }
+            },
 
             Action::SetListenPort { interface, port } => {
                 a.push("set-listen-port".into());
@@ -367,26 +397,29 @@ impl Action {
                 a.push("--listen-port".into());
                 a.push(validate_port(*port)?.to_string());
                 a.push("--yes".into());
-            }
+            },
             Action::UnsetListenPort { interface } => {
                 a.push("set-listen-port".into());
                 a.push(validate_interface(interface)?);
                 a.push("--unset".into());
                 a.push("--yes".into());
-            }
-            Action::OverrideEndpoint { interface, endpoint } => {
+            },
+            Action::OverrideEndpoint {
+                interface,
+                endpoint,
+            } => {
                 a.push("override-endpoint".into());
                 a.push(validate_interface(interface)?);
                 a.push("--endpoint".into());
                 a.push(validate_endpoint(endpoint)?);
                 a.push("--yes".into());
-            }
+            },
             Action::UnsetEndpoint { interface } => {
                 a.push("override-endpoint".into());
                 a.push(validate_interface(interface)?);
                 a.push("--unset".into());
                 a.push("--yes".into());
-            }
+            },
             Action::OverridePeerEndpoint {
                 interface,
                 peer,
@@ -399,7 +432,7 @@ impl Action {
                 a.push("--endpoint".into());
                 a.push(validate_endpoint(endpoint)?);
                 a.push("--yes".into());
-            }
+            },
             Action::UnsetPeerEndpoint { interface, peer } => {
                 a.push("override-peer-endpoint".into());
                 a.push(validate_interface(interface)?);
@@ -407,7 +440,7 @@ impl Action {
                 a.push(validate_peer_name(peer)?);
                 a.push("--unset".into());
                 a.push("--yes".into());
-            }
+            },
 
             Action::AddPeer {
                 interface,
@@ -434,7 +467,7 @@ impl Action {
                     (false, Some(addr)) if !addr.trim().is_empty() => {
                         a.push("--ip".into());
                         a.push(validate_cidr(addr)?);
-                    }
+                    },
                     (false, _) => a.push("--auto-ip".into()),
                 }
                 a.push("--admin".into());
@@ -452,21 +485,21 @@ impl Action {
                     a.push(routes.join(","));
                 }
                 a.push("--yes".into());
-            }
+            },
             Action::DisablePeer { interface, name } => {
                 a.push("disable-peer".into());
                 a.push(validate_interface(interface)?);
                 a.push("--name".into());
                 a.push(validate_peer_name(name)?);
                 a.push("--yes".into());
-            }
+            },
             Action::EnablePeer { interface, name } => {
                 a.push("enable-peer".into());
                 a.push(validate_interface(interface)?);
                 a.push("--name".into());
                 a.push(validate_peer_name(name)?);
                 a.push("--yes".into());
-            }
+            },
             Action::RenamePeer {
                 interface,
                 name,
@@ -479,7 +512,7 @@ impl Action {
                 a.push("--new-name".into());
                 a.push(validate_peer_name(new_name)?);
                 a.push("--yes".into());
-            }
+            },
 
             Action::AddCidr {
                 interface,
@@ -500,7 +533,7 @@ impl Action {
                     }
                 }
                 a.push("--yes".into());
-            }
+            },
             Action::RenameCidr {
                 interface,
                 name,
@@ -513,14 +546,14 @@ impl Action {
                 a.push("--new-name".into());
                 a.push(validate_cidr_name(new_name)?);
                 a.push("--yes".into());
-            }
+            },
             Action::DeleteCidr { interface, name } => {
                 a.push("delete-cidr".into());
                 a.push(validate_interface(interface)?);
                 a.push("--name".into());
                 a.push(validate_cidr_name(name)?);
                 a.push("--yes".into());
-            }
+            },
             Action::AddAssociation {
                 interface,
                 cidr1,
@@ -531,7 +564,7 @@ impl Action {
                 a.push(validate_cidr_name(cidr1)?);
                 a.push(validate_cidr_name(cidr2)?);
                 a.push("--yes".into());
-            }
+            },
             Action::DeleteAssociation {
                 interface,
                 cidr1,
@@ -542,7 +575,7 @@ impl Action {
                 a.push(validate_cidr_name(cidr1)?);
                 a.push(validate_cidr_name(cidr2)?);
                 a.push("--yes".into());
-            }
+            },
         }
 
         Ok(a)
@@ -646,7 +679,7 @@ fn get_state() -> StateResult {
                 snapshot: None,
                 binary: None,
             }
-        }
+        },
     };
 
     let output = match Command::new(&binary).args(["show", "--json"]).output() {
@@ -659,7 +692,7 @@ fn get_state() -> StateResult {
                 snapshot: None,
                 binary: Some(binary),
             }
-        }
+        },
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -688,7 +721,7 @@ fn get_state() -> StateResult {
                     binary: Some(binary),
                 }
             }
-        }
+        },
         Err(e) => {
             let unsupported_json = stderr.contains("--json")
                 && (stderr.contains("unexpected argument")
@@ -714,7 +747,7 @@ fn get_state() -> StateResult {
                 snapshot: None,
                 binary: Some(binary),
             }
-        }
+        },
     }
 }
 
@@ -735,7 +768,7 @@ fn preview_invite(path: String) -> InvitePreview {
                 address: None,
                 server_endpoint: None,
             }
-        }
+        },
     };
 
     let text = match std::fs::read_to_string(&pb) {
@@ -749,7 +782,7 @@ fn preview_invite(path: String) -> InvitePreview {
                 address: None,
                 server_endpoint: None,
             }
-        }
+        },
     };
 
     // Minimal TOML scraping: the invitation file has a stable [interface] and
@@ -779,7 +812,7 @@ fn preview_invite(path: String) -> InvitePreview {
             ("interface", "network-name") => network_name = Some(v.to_string()),
             ("interface", "address") => address = Some(v.to_string()),
             ("server", "external-endpoint") => server_endpoint = Some(v.to_string()),
-            _ => {}
+            _ => {},
         }
     }
 
@@ -806,7 +839,7 @@ fn run_action(action: Action) -> ActionResult {
                 needs_admin: false,
                 command: String::new(),
             }
-        }
+        },
     };
 
     let binary = match cli_path() {
@@ -820,7 +853,7 @@ fn run_action(action: Action) -> ActionResult {
                 needs_admin: false,
                 command: String::new(),
             }
-        }
+        },
     };
 
     let display = format!(
@@ -866,7 +899,10 @@ fn run_privileged(binary: &str, args: &[String]) -> ActionResult {
          with prompt \"innernet needs permission to change network settings\""
     );
 
-    match Command::new("osascript").args(["-e", &applescript]).output() {
+    match Command::new("osascript")
+        .args(["-e", &applescript])
+        .output()
+    {
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
             let cancelled = stderr.contains("-128") || stderr.contains("User canceled");
@@ -882,7 +918,7 @@ fn run_privileged(binary: &str, args: &[String]) -> ActionResult {
                 needs_admin: false,
                 command: String::new(),
             }
-        }
+        },
         Err(e) => ActionResult {
             ok: false,
             stdout: String::new(),

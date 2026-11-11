@@ -733,6 +733,8 @@ dependencies = [
  "innernet-shared",
  "log",
  "regex",
+ "serde",
+ "serde_json",
  "ureq",
  "wireguard-control",
 ]

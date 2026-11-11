@@ -9,8 +9,8 @@
 //! that talks JSON to the endpoints below.
 
 use std::collections::VecDeque;
-use std::ops::Deref;
 use std::net::SocketAddr;
+use std::ops::Deref;
 
 use hyper::{Body, Request, Response, StatusCode};
 use ipnet::IpNet;
@@ -22,9 +22,9 @@ use crate::web::auth::Account;
 
 pub mod auth;
 pub mod ui;
-use ui::INDEX_HTML;
 use crate::ServerError;
 use innernet_shared::PeerContents;
+use ui::INDEX_HTML;
 use wireguard_control::{DeviceUpdate, PeerConfigBuilder};
 
 /// Name of the cookie carrying the session token.
@@ -120,16 +120,15 @@ fn peer_to_view(peer: &DatabasePeer) -> PeerView {
         is_admin: peer.is_admin,
         is_disabled: peer.is_disabled,
         is_redeemed: peer.is_redeemed,
-        allowed_subnets: peer
-            .allowed_subnets
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        allowed_subnets: peer.allowed_subnets.iter().map(|s| s.to_string()).collect(),
     }
 }
 
 fn admin_account(conn: &Connection, token: &str) -> Option<Account> {
-    auth::session_account(conn, token).ok().flatten().filter(|a| a.is_admin)
+    auth::session_account(conn, token)
+        .ok()
+        .flatten()
+        .filter(|a| a.is_admin)
 }
 
 /// Push a peer's current database state onto the live WireGuard interface.
@@ -155,9 +154,7 @@ pub fn parse_subnets(body: &str) -> Result<Vec<IpNet>, String> {
         serde_json::from_str(body).map_err(|e| format!("invalid JSON: {e}"))?;
     let mut out = Vec::new();
     for raw in parsed.allowed_subnets {
-        let net: IpNet = raw
-            .parse()
-            .map_err(|_| format!("invalid CIDR: {raw}"))?;
+        let net: IpNet = raw.parse().map_err(|_| format!("invalid CIDR: {raw}"))?;
         out.push(net);
     }
     Ok(out)
@@ -227,7 +224,11 @@ fn random_password() -> String {
 }
 
 /// Handler entry point. Returns `PassThrough` when the path is not ours.
-pub async fn handle(req: Request<Body>, _remote: SocketAddr, context: crate::Context) -> WebOutcome {
+pub async fn handle(
+    req: Request<Body>,
+    _remote: SocketAddr,
+    context: crate::Context,
+) -> WebOutcome {
     let interface = context.interface.clone();
     let backend = context.backend;
 
@@ -274,20 +275,22 @@ pub async fn handle(req: Request<Body>, _remote: SocketAddr, context: crate::Con
                         }
                         WebOutcome::Handled(resp)
                     },
-                    Err(_) => WebOutcome::Handled(text(StatusCode::INTERNAL_SERVER_ERROR, "session")),
+                    Err(_) => {
+                        WebOutcome::Handled(text(StatusCode::INTERNAL_SERVER_ERROR, "session"))
+                    },
                 },
                 _ => WebOutcome::Handled(json(
                     StatusCode::UNAUTHORIZED,
                     &serde_json::json!({ "error": "invalid credentials" }),
                 )),
             };
-        }
+        },
         Some("logout") => {
             if let Some(t) = &token {
                 let _ = auth::delete_session(conn, t);
             }
             return WebOutcome::Handled(json(StatusCode::OK, &serde_json::json!({"ok": true})));
-        }
+        },
         _ => {},
     }
 
@@ -311,7 +314,7 @@ pub async fn handle(req: Request<Body>, _remote: SocketAddr, context: crate::Con
                 let views: Vec<PeerView> = peers.iter().map(peer_to_view).collect();
                 json(StatusCode::OK, &views)
             })
-        }
+        },
 
         Some("peers") => {
             let Some(id) = components.pop_front().and_then(|s| s.parse::<i64>().ok()) else {
@@ -324,7 +327,7 @@ pub async fn handle(req: Request<Body>, _remote: SocketAddr, context: crate::Con
             match (method.clone(), action.as_deref()) {
                 (hyper::Method::GET, None) => {
                     DatabasePeer::get(conn, id).map(|p| json(StatusCode::OK, &peer_to_view(&p)))
-                }
+                },
 
                 (hyper::Method::PUT, Some("subnets")) if components.is_empty() => {
                     let body = String::from_utf8_lossy(&body_bytes).to_string();
@@ -344,7 +347,7 @@ pub async fn handle(req: Request<Body>, _remote: SocketAddr, context: crate::Con
                             Ok(json(StatusCode::OK, &peer_to_view(&peer)))
                         })(),
                     }
-                }
+                },
 
                 (hyper::Method::PUT, Some("disabled")) if components.is_empty() => {
                     let want = serde_json::from_slice::<serde_json::Value>(&body_bytes)
@@ -373,11 +376,11 @@ pub async fn handle(req: Request<Body>, _remote: SocketAddr, context: crate::Con
                         apply_peer(&peer, &interface, backend)?;
                         Ok(json(StatusCode::OK, &peer_to_view(&peer)))
                     })()
-                }
+                },
 
                 _ => return WebOutcome::Handled(text(StatusCode::NOT_FOUND, "peer route")),
             }
-        }
+        },
 
         Some("cidrs") if method == hyper::Method::GET => {
             crate::db::DatabaseCidr::list(conn).map(|cidrs| {
@@ -392,7 +395,7 @@ pub async fn handle(req: Request<Body>, _remote: SocketAddr, context: crate::Con
                     .collect();
                 json(StatusCode::OK, &views)
             })
-        }
+        },
 
         _ => return WebOutcome::Handled(text(StatusCode::NOT_FOUND, "not found")),
     };

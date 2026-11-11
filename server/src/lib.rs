@@ -35,11 +35,11 @@ use wireguard_control::{
 mod api;
 mod db;
 mod error;
-mod web;
 pub mod initialize;
 #[cfg(test)]
 mod test;
 mod util;
+mod web;
 
 pub use error::ServerError;
 

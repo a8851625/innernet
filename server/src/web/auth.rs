@@ -91,8 +91,12 @@ fn generate_salt() -> Vec<u8> {
 
 /// 32-byte iterated digest (FNV-1a style mixing, 4096 rounds).
 fn digest(password: &[u8], salt: &[u8]) -> Vec<u8> {
-    let mut state = [0xcbf29ce484222325u64, 0x9e3779b97f4a7c15u64,
-                     0x6a09e667f3bcc909u64, 0xbb67ae8584caa73bu64];
+    let mut state = [
+        0xcbf29ce484222325u64,
+        0x9e3779b97f4a7c15u64,
+        0x6a09e667f3bcc909u64,
+        0xbb67ae8584caa73bu64,
+    ];
     for round in 0..4096u64 {
         for (i, chunk) in password.chunks(8).enumerate() {
             let mut w = [0u8; 8];
@@ -219,21 +223,17 @@ pub fn authenticate(
         .optional()?;
 
     Ok(match row {
-        Some((id, username, hash, is_admin)) if verify_password(password, &hash) => {
-            Some(Account {
-                id,
-                username,
-                is_admin,
-            })
-        },
+        Some((id, username, hash, is_admin)) if verify_password(password, &hash) => Some(Account {
+            id,
+            username,
+            is_admin,
+        }),
         _ => None,
     })
 }
 
 pub fn create_session(conn: &Connection, account_id: i64) -> Result<String, rusqlite::Error> {
-    let token = b64(&generate_salt())
-        + &b64(&generate_salt())
-        + &b64(&generate_salt());
+    let token = b64(&generate_salt()) + &b64(&generate_salt()) + &b64(&generate_salt());
     let expires = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -246,10 +246,7 @@ pub fn create_session(conn: &Connection, account_id: i64) -> Result<String, rusq
     Ok(token)
 }
 
-pub fn session_account(
-    conn: &Connection,
-    token: &str,
-) -> Result<Option<Account>, rusqlite::Error> {
+pub fn session_account(conn: &Connection, token: &str) -> Result<Option<Account>, rusqlite::Error> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -290,7 +287,10 @@ mod tests {
     fn password_hash_is_salted() {
         let a = hash_password("same");
         let b = hash_password("same");
-        assert_ne!(a, b, "identical passwords must not produce identical hashes");
+        assert_ne!(
+            a, b,
+            "identical passwords must not produce identical hashes"
+        );
         assert!(verify_password("same", &a));
         assert!(verify_password("same", &b));
     }

@@ -110,9 +110,7 @@ pub fn interface_snapshot(
             is_disabled: peer.is_disabled,
             is_you: me.map(|m| m.public_key == peer.public_key).unwrap_or(false),
             is_connected: info.map(|i| i.is_recently_connected()).unwrap_or(false),
-            endpoint: info
-                .and_then(|i| i.config.endpoint)
-                .map(|e| e.to_string()),
+            endpoint: info.and_then(|i| i.config.endpoint).map(|e| e.to_string()),
             endpoint_overridden,
             last_handshake_secs_ago: info
                 .and_then(|i| i.stats.last_handshake_time)
@@ -120,11 +118,7 @@ pub fn interface_snapshot(
                 .map(|d| d.as_secs()),
             rx_bytes: info.map(|i| i.stats.rx_bytes).unwrap_or(0),
             tx_bytes: info.map(|i| i.stats.tx_bytes).unwrap_or(0),
-            allowed_subnets: peer
-                .allowed_subnets
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            allowed_subnets: peer.allowed_subnets.iter().map(|s| s.to_string()).collect(),
         });
     }
 

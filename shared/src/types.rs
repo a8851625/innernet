@@ -1177,7 +1177,9 @@ mod tests {
             },
         };
 
-        let diff = PeerDiff::new(None, Some(&peer)).unwrap().expect("expected a diff");
+        let diff = PeerDiff::new(None, Some(&peer))
+            .unwrap()
+            .expect("expected a diff");
         let config = diff.peer_config();
         let allowed: Vec<(String, u8)> = config
             .allowed_ips
@@ -1185,7 +1187,10 @@ mod tests {
             .map(|a| (a.address.to_string(), a.cidr))
             .collect();
 
-        assert!(allowed.contains(&(ip.to_string(), 32)), "peer /32 missing: {allowed:?}");
+        assert!(
+            allowed.contains(&(ip.to_string(), 32)),
+            "peer /32 missing: {allowed:?}"
+        );
         assert!(
             allowed.contains(&("192.168.31.0".to_string(), 24)),
             "192.168.31.0/24 missing: {allowed:?}"
@@ -1194,7 +1199,11 @@ mod tests {
             allowed.contains(&("10.10.111.0".to_string(), 24)),
             "10.10.111.0/24 missing: {allowed:?}"
         );
-        assert_eq!(allowed.len(), 3, "unexpected extra allowed-ips: {allowed:?}");
+        assert_eq!(
+            allowed.len(),
+            3,
+            "unexpected extra allowed-ips: {allowed:?}"
+        );
     }
 
     #[test]
@@ -1218,7 +1227,9 @@ mod tests {
                 allowed_subnets: vec!["10.0.0.0/24".parse().unwrap()],
             },
         };
-        let diff = PeerDiff::new(None, Some(&peer)).unwrap().expect("expected a diff");
+        let diff = PeerDiff::new(None, Some(&peer))
+            .unwrap()
+            .expect("expected a diff");
         let config = diff.peer_config();
         let allowed: Vec<(String, u8)> = config
             .allowed_ips
@@ -1250,7 +1261,9 @@ mod tests {
             },
         };
         peer.contents.is_disabled = true;
-        let diff = PeerDiff::new(None, Some(&peer)).unwrap().expect("expected a diff");
+        let diff = PeerDiff::new(None, Some(&peer))
+            .unwrap()
+            .expect("expected a diff");
         // A disabled peer yields an empty peer config (no allowed-ips), which the
         // backend interprets as "remove this peer".
         let config = diff.peer_config();
