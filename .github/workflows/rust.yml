@@ -48,12 +48,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Pinned: rustfmt output changes between nightlies, and rustfmt.toml uses
-      # unstable options, so an unpinned nightly would make this job fail on
-      # code nobody touched.
-      - uses: dtolnay/rust-toolchain@nightly
+      # Stable, not nightly. rustfmt.toml sets unstable options
+      # (imports_granularity, indent_style, reorder_impl_items); on stable they
+      # are ignored with a warning rather than being an error, so the check
+      # stays meaningful without depending on a specific nightly date that may
+      # not exist on the rustup mirror. Pinning a nightly date broke CI once
+      # already for exactly that reason.
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2026-11-01
           components: rustfmt
       - name: Rustfmt
         run: cargo fmt --all -- --check

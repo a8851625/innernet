@@ -102,10 +102,15 @@ jobs:
           # The installer verifies this. Each matrix job produces its own
           # fragment because jobs run on separate machines; the checksum job
           # below merges them into one SHA256SUMS.
+          # Name the fragment after the target: every matrix job produces a
+          # file called SHA256SUMS.part, and the merge job downloads them into
+          # one directory, so identical names would overwrite each other and
+          # silently drop all but one platform.
+          fragment="SHA256SUMS-${{ matrix.target }}.part"
           if command -v sha256sum > /dev/null; then
-            sha256sum *.tar.gz *.zip > SHA256SUMS.part 2>/dev/null || true
+            sha256sum *.tar.gz *.zip > "$fragment" 2>/dev/null || true
           else
-            shasum -a 256 *.tar.gz *.zip > SHA256SUMS.part 2>/dev/null || true
+            shasum -a 256 *.tar.gz *.zip > "$fragment" 2>/dev/null || true
           fi
           ls -lh
 
@@ -114,16 +119,15 @@ jobs:
           name: cli-server-${{ matrix.target }}
           path: |
             dist/*
-            !dist/SHA256SUMS.part
+            !dist/SHA256SUMS-*.part
           if-no-files-found: error
 
       # Upload the checksum fragment separately so the merge job can find it
       # without downloading the (much larger) archives.
       - uses: actions/upload-artifact@v4
-        if: runner.os != 'Windows'
         with:
           name: sums-${{ matrix.target }}
-          path: dist/SHA256SUMS.part
+          path: dist/SHA256SUMS-*.part
           if-no-files-found: warn
 
       # Attach to the Release when this run was triggered by a tag.
@@ -238,7 +242,7 @@ jobs:
         run: |
           set -euo pipefail
           # Fragments are "<sha>  <file>"; sorting gives a stable file.
-          cat fragments/SHA256SUMS.part | sort -k2 > SHA256SUMS
+          cat fragments/*.part | sort -k2 > SHA256SUMS
           echo "--- merged ---"
           cat SHA256SUMS
 
