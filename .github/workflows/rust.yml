@@ -109,6 +109,24 @@ jobs:
       # without needing a macOS runner or a tap checkout.
       - name: Formula syntax
         run: ruby -c homebrew/Formula/innernet.rb
+      # The release workflow rewrites the formula from SHA256SUMS. Exercise the
+      # rewriter here so a broken updater fails on the PR rather than at tag
+      # time, when the release is already half published.
+      - name: Formula updater tests
+        run: python3 scripts/test-update-homebrew-formula.py
+      # Catch the case this was all written for: a tag went out but the formula
+      # still points at an older version.
+      - name: Formula matches the crate version
+        run: |
+          set -euo pipefail
+          crate=$(grep -m1 '^version' client/Cargo.toml | cut -d'"' -f2)
+          formula=$(grep -m1 '^  version' homebrew/Formula/innernet.rb | cut -d'"' -f2)
+          echo "crate:   $crate"
+          echo "formula: $formula"
+          if [ "$crate" != "$formula" ]; then
+            echo "::error::homebrew/Formula/innernet.rb is at $formula but the crate is at $crate. The release workflow bumps it automatically, so this means the bump was missed."
+            exit 1
+          fi
 
   gui:
     runs-on: ${{ matrix.os }}
