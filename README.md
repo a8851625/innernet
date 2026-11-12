@@ -5,6 +5,11 @@
 
 A private network system that uses [WireGuard](https://wireguard.com) under the hood. See the [announcement blog post](https://blog.tonari.no/introducing-innernet) for a longer-winded explanation.
 
+> **This is a fork** of [tonarino/innernet](https://github.com/tonarino/innernet) that adds
+> subnet routing, a [web admin UI](#web-admin-ui), and a desktop GUI. Prebuilt binaries are on the
+> [releases page](https://github.com/a8851625/innernet/releases); see
+> [Getting started](#getting-started) for install options.
+
 <img src="https://user-images.githubusercontent.com/373823/118917068-09ae7700-b96b-11eb-80f4-6860072d504d.gif" width="600" height="370">
 
 `innernet` is similar in its goals to Slack's [nebula](https://github.com/slackhq/nebula) or [Tailscale](https://tailscale.com/), but takes a bit of a different approach. It aims to take advantage of existing networking concepts like CIDRs and the security properties of WireGuard to turn your computer's basic IP networking into more powerful ACL primitives.
@@ -103,6 +108,59 @@ Not supported yet. The client depends on Unix domain sockets and Linux
 netlink for interface and route management, so it does not build for Windows.
 See [#1](https://github.com/a8851625/innernet/issues) for status.
 
+## Web admin UI
+
+`innernet-server` serves a small admin interface so a network can be managed
+without shelling into the server. It listens on loopback only, by default at
+`127.0.0.1:8380`:
+
+```sh
+sudo innernet-server serve <interface>                       # http://127.0.0.1:8380/web
+sudo innernet-server serve <interface> --web-listen 0.0.0.0:8380   # expose it yourself
+sudo innernet-server serve <interface> --web-listen ""       # turn it off
+```
+
+On first start the server creates an `admin` account and prints the generated
+password once:
+
+```
+  ┌──────────────────────────────────────────────────────┐
+  │ web admin UI enabled                                 │
+  │   url      : http://127.0.0.1:8380/web               │
+  │   username : admin                                   │
+  │   password : <generated, shown only this time>       │
+  └──────────────────────────────────────────────────────┘
+```
+
+Only a hash is stored. To reset the password, delete the `web_accounts` row and
+restart the server; a fresh password is generated and printed.
+
+Because it binds to loopback, reach it over an SSH tunnel:
+
+```sh
+ssh -N -L 8380:127.0.0.1:8380 root@<server>
+# then open http://127.0.0.1:8380/web
+```
+
+What it can do:
+
+| Section | Actions |
+| --- | --- |
+| Peers | invite a device, rename, enable/disable, delete, edit subnet routes |
+| CIDRs | add, rename, delete |
+| Associations | list, add, remove |
+
+Inviting a peer generates the invitation and shows it once, with copy and
+download buttons. The private key is never written to the server's disk — it
+exists only in that response — so if you lose it, delete the peer and invite
+again. Route edits, deletions and revocation all reach the running WireGuard
+interface immediately; there is no restart step.
+
+Every action is admin-only, authenticated by a session cookie, and the API
+rejects unauthenticated requests with `401`. The listener speaks plain HTTP and
+has no TLS of its own, which is why it defaults to loopback — put a reverse
+proxy in front of it if you need remote access, and do not expose it directly.
+
 ## Usage
 
 ### Server Creation
@@ -197,19 +255,92 @@ sudo innernet delete-associations <interface>
 
 ### Enabling/Disabling Peers
 
-For security reasons, IP addresses cannot be re-used by new peers, and therefore peers cannot be deleted. However, they can be disabled. Disabled peers will not show up in the list of peers when fetching the config for an interface.
+A peer can be *disabled*, which revokes its access while keeping its address
+reserved. Disabled peers are left out of the config that other peers fetch, and
+their key is removed from the WireGuard interface.
 
 Disable a peer with
 
-```su
+```sh
 sudo innernet disable-peer <interface>
 ```
 
 Or re-enable a peer with
 
-```su
+```sh
 sudo innernet enable-peer <interface>
 ```
+
+Disabling is the reversible option and is what you want for a device that is
+merely offline. To free the address instead, remove the peer outright — see
+[Deleting a Peer](#deleting-a-peer).
+
+### Deleting a Peer
+
+Disabling a peer keeps its address reserved forever. When a device is gone for
+good, delete the peer instead: its key is detached from the WireGuard interface
+(so access stops immediately) and its row is dropped from the database, which
+returns the address to the free pool.
+
+Deleting is only available through the [web admin UI](#web-admin-ui) or the
+admin HTTP API — the `innernet` CLI intentionally keeps only the reversible
+disable. The server peer itself cannot be deleted.
+
+### Advertising Subnet Routes
+
+A peer can act as a gateway for a network behind it. For example, a machine at
+home that can reach `192.168.1.0/24` can advertise that subnet, and every other
+peer then routes those addresses through it.
+
+```sh
+sudo innernet-server add-peer <interface> --advertise-routes 192.168.1.0/24
+```
+
+Routes are stored per peer and pushed to the other peers as extra WireGuard
+allowed-ips, so the traffic is encrypted and authenticated like any other
+peer-to-peer packet. Several routes can be given comma-separated:
+
+```sh
+--advertise-routes 192.168.1.0/24,10.20.0.0/16
+```
+
+For an existing peer, edit the routes in the [web admin UI](#web-admin-ui) —
+changes are applied to the running interface immediately, with no restart. To
+revoke them, remove the routes or disable the peer; disabling clears the routes
+as well, so a compromised gateway stops advertising at once.
+
+The gateway machine must also forward and masquerade the traffic itself, for
+example:
+
+```sh
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -A POSTROUTING -o <upstream-iface> -j MASQUERADE
+```
+
+### NAT Traversal Candidates
+
+For two peers to talk directly, each has to learn an address that reaches the
+other through its NAT. A peer reports candidates — its local interface
+addresses, plus its public address as seen from outside — and the server hands
+each side the list for the other. The server also injects the source address it
+actually observes for a peer, which is usually the most accurate mapping.
+
+Reporting the public address normally works by asking Quad9 (`whatismyip.on.quad9.net`)
+over DNS. Behind a transparent proxy or a DNS fake-IP resolver that answer is
+wrong (typically a reserved `198.18.0.0/15` address), so it is dropped with a
+warning and the peer falls back to local candidates only. Supply the address
+explicitly in that case:
+
+```sh
+sudo innernet fetch <interface> --public-endpoint 203.0.113.7:51820
+```
+
+A single `up` gives each candidate only a few seconds, which is often too short
+when a NAT mapping is still being established. Run the interface as a daemon so
+traversal is retried — see [Keeping the interface up](#keeping-the-interface-up-linux-and-macos).
+If direct connectivity is impossible (symmetric NAT on both ends, for instance)
+there is no relay to fall back on: innernet is WireGuard peer-to-peer, so the
+workaround is to override the endpoint manually.
 
 ### Specifying a Manual Endpoint
 

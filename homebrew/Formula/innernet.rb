@@ -12,7 +12,7 @@
 class Innernet < Formula
   desc "Private networks over WireGuard, with subnet routing and a web admin UI"
   homepage "https://github.com/a8851625/innernet"
-  version "2.1.2"
+  version "2.2.2"
   license "MIT"
 
   # Each architecture is a separate release archive. Both are declared inside
@@ -20,13 +20,13 @@ class Innernet < Formula
   # top-level url plus an on_intel override would leave the checksum
   # ambiguous.
   on_arm do
-    url "https://github.com/a8851625/innernet/releases/download/v2.1.2/innernet-2.1.2-aarch64-apple-darwin.tar.gz"
-    sha256 "5d87042ec8f05689ac5f86d0d2fb8d3c1c6a77e2a068bc4807548047cb79fca9"
+    url "https://github.com/a8851625/innernet/releases/download/v2.2.2/innernet-2.2.2-aarch64-apple-darwin.tar.gz"
+    sha256 "158af8b1d25c270ccfa724bd240790d9f204a028f309c28e09a22a9e4410a107"
   end
 
   on_intel do
-    url "https://github.com/a8851625/innernet/releases/download/v2.1.2/innernet-2.1.2-x86_64-apple-darwin.tar.gz"
-    sha256 "2d6b21d017357b2b7948d199e42765100944cba5d00d032472324e605feb8f13"
+    url "https://github.com/a8851625/innernet/releases/download/v2.2.2/innernet-2.2.2-x86_64-apple-darwin.tar.gz"
+    sha256 "9b477909abd9f6f1b52ab41ea6108a1b82e14883a49c8a848ef3eb39f097e65d"
   end
 
   livecheck do
