@@ -16,13 +16,13 @@ name = "innernet-client-core"
 publish = true
 readme = "../README.md"
 repository = "https://github.com/tonarino/innernet"
-version = "2.1.0"
+version = "2.1.1"
 
 [dependencies]
 anyhow = "1"
 colored.workspace = true
-innernet-publicip = { version = "2.1.0", path = "../publicip" }
-innernet-shared = { version = "2.1.0", path = "../shared" }
+innernet-publicip = { version = "2.1.1", path = "../publicip" }
+innernet-shared = { version = "2.1.1", path = "../shared" }
 log = "0.4"
 regex = { version = "1", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
