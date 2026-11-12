@@ -29,6 +29,7 @@ use util::{human_duration, human_size};
 use wireguard_control::{Device, InterfaceName, PeerInfo};
 
 mod json;
+mod service;
 mod util;
 
 struct PeerState<'a> {
@@ -144,6 +145,16 @@ enum Command {
         #[clap(long)]
         yes: bool,
     },
+
+    /// Install a system service that keeps the interface up, including at boot.
+    ///
+    /// On Linux this writes a systemd unit; on macOS a launchd daemon. The
+    /// service runs `up --daemon` so it re-attempts NAT traversal instead of
+    /// giving up after one pass, which is what a plain `up` does.
+    InstallService { interface: Interface },
+
+    /// Remove the service installed by `install-service`.
+    UninstallService { interface: Interface },
 
     /// Bring down the interface (equivalent to 'wg-quick down INTERFACE')
     Down { interface: Interface },
@@ -360,39 +371,32 @@ fn install(
         interface = interface_name.to_string().yellow(),
         installed = "installed".green(),
     );
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
         eprintdoc!(
             "
-                It's recommended to now keep the interface automatically refreshing via systemd:
+                Keep the interface refreshed automatically, starting at boot:
 
-                    {systemctl_enable}{interface}
-        ",
+                    {install_service}{interface}
+
+                A single `up` gives each NAT traversal candidate only a few
+                seconds before giving up, which is often too short when a peer
+                is behind a translated NAT. The service runs in daemon mode and
+                keeps retrying, so traversal eventually succeeds and then stays
+                up.
+            ",
+            install_service = "sudo innernet install-service ".yellow(),
             interface = interface_name.to_string().yellow(),
-            systemctl_enable = "systemctl enable --now innernet@".yellow(),
         );
-    } else if cfg!(target_os = "macos") {
-        eprintdoc!("
-            It's recommended to now keep the interface automatically refreshing, which you can
-            do via a launchd script (easier macOS helpers to be added to innernet in a later version).
-
-            Ex. to run innernet in a 60s update loop:
-
-                {daemon_mode} {interface}
-        ",
-            interface = interface_name.to_string().yellow(),
-            daemon_mode = "innernet up -d --interval 60".yellow());
     } else {
         eprintdoc!(
             "
-            It's recommended to now keep the interface automatically refreshing via whatever service
-            system your distribution provides.
+                Keep the interface refreshed automatically via your init system,
+                in a 60s update loop:
 
-            Ex. to run innernet in a 60s update loop:
-
-                {daemon_mode} {interface}
+                    {daemon_mode} {interface}
         ",
-            interface = interface_name.to_string().yellow(),
-            daemon_mode = "innernet up -d --interval 60".yellow()
+            daemon_mode = "innernet up -d --interval 60".yellow(),
+            interface = interface_name.to_string().yellow()
         );
     }
     Ok(())
@@ -1236,6 +1240,8 @@ fn run(opts: &Opts) -> Result<(), Error> {
         )?,
         Command::Down { interface } => wg::down(&interface, opts.network.backend)?,
         Command::Uninstall { interface, yes } => uninstall(&interface, opts, yes)?,
+        Command::InstallService { interface } => service::install(&interface)?,
+        Command::UninstallService { interface } => service::uninstall(&interface)?,
         Command::AddPeer {
             interface,
             sub_opts,

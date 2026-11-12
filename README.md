@@ -28,6 +28,40 @@ brew install innernet
 This installs the prebuilt binaries, not a source build, so no Rust toolchain
 is needed.
 
+### Keeping the interface up (Linux and macOS)
+
+`innernet up` runs once: it fetches the peer list, attempts NAT traversal, and
+exits. Since a peer behind a translating NAT may not answer within that window,
+a single `up` can leave the interface without connectivity even though a
+connection is possible. Install a service so the interface is brought up at
+boot and keeps retrying:
+
+```sh
+sudo innernet install-service heheda-mesh
+```
+
+On Linux this writes `/etc/systemd/system/innernet@heheda-mesh.service`, runs
+`systemctl daemon-reload`, and enables plus starts the unit. On macOS it writes
+`/Library/LaunchDaemons/com.innernet.heheda-mesh.plist` and bootstraps it via
+`launchctl`. Either way the generated unit points at the binary you invoked, so
+a Homebrew install (`/opt/homebrew/bin`) or a custom prefix works — the
+`systemd` template in this repo hardcodes `/usr/bin` and is only a reference
+for packagers.
+
+```sh
+# follow what it is doing
+systemctl status innernet@heheda-mesh      # Linux
+sudo launchctl print system/com.innernet.heheda-mesh   # macOS
+tail -f /var/log/innernet-heheda-mesh.log  # macOS log
+
+# remove it
+sudo innernet uninstall-service heheda-mesh
+```
+
+`uninstall-service` removes the unit and stops the daemon, but leaves
+`/etc/innernet` and `/var/lib/innernet` untouched, so the network membership
+survives and you can bring the interface back up with `innernet up`.
+
 ### Install script (Linux and macOS)
 
 ```sh

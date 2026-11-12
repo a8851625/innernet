@@ -6,6 +6,11 @@ PartOf=innernet.target
 
 [Service]
 Type=simple
+# innernet is not always installed at /usr/bin (Homebrew uses
+# /opt/homebrew/bin, a source build may be /usr/local/bin). `innernet
+# install-service` writes a unit with the correct absolute path, so prefer that
+# command over copying this template by hand; this file is a reference and a
+# fallback for packagers who know their prefix.
 ExecStart=/usr/bin/innernet up %i --daemon --interval 60
 Restart=always
 # When the daemon exits, wait this amount of secs before restarting. Used to prevent StartLimitBurst

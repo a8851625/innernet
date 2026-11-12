@@ -15,7 +15,7 @@ name = "innernet"
 publish = true
 readme = "../README.md"
 repository = "https://github.com/tonarino/innernet"
-version = "2.1.2"
+version = "2.2.0"
 
 [[bin]]
 name = "innernet"
@@ -28,8 +28,8 @@ clap_complete = "4.3"
 colored.workspace = true
 dialoguer.workspace = true
 indoc = "2.0.1"
-innernet-shared = { version = "2.1.2", path = "../shared" }
-innernet-client-core = { version = "2.1.2", path = "../client-core" }
+innernet-shared = { version = "2.2.0", path = "../shared" }
+innernet-client-core = { version = "2.2.0", path = "../client-core" }
 log = "0.4"
 regex = { version = "1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
