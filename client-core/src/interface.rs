@@ -19,7 +19,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     path::Path,
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 use wireguard_control::{Backend, Device, DeviceUpdate, PeerConfigBuilder};
@@ -105,6 +105,14 @@ pub fn redeem_invite(
         error: e,
     })?;
 
+    // The server's coordination API listens on the WireGuard-internal address,
+    // so the handshake has to complete before the first HTTP request can reach
+    // it. Without this wait the redeem POST races the handshake and loses:
+    // on a 200ms-RTT link the SYN goes out microseconds after the handshake
+    // initiation and the request times out before the tunnel exists, which
+    // looks like "is the innernet server reachable?" even though it is.
+    wait_for_handshake(interface, network_opts.backend);
+
     update_keypair(network_opts, interface, &config_path, config).inspect_err(|e| {
         log::error!("failed to update keypair (is the innernet server reachable?): {e}.",);
         log::info!("bringing down the interface.");
@@ -114,6 +122,46 @@ pub fn redeem_invite(
     })?;
 
     Ok(())
+}
+
+/// Wait until the WireGuard interface has completed a handshake, up to a few
+/// seconds.
+///
+/// This is best-effort on purpose: a failure here is not fatal, because the
+/// redeem request that follows will produce a clearer error if the tunnel
+/// really is unusable.
+fn wait_for_handshake(interface: &InterfaceName, backend: wireguard_control::Backend) {
+    const TIMEOUT: Duration = Duration::from_secs(10);
+    const INTERVAL: Duration = Duration::from_millis(100);
+
+    let started = std::time::Instant::now();
+    loop {
+        match Device::get(interface, backend) {
+            Ok(device) => {
+                let handshaked = device
+                    .peers
+                    .iter()
+                    .any(|p| p.stats.last_handshake_time.is_some());
+                if handshaked {
+                    log::debug!("handshake completed in {:?}.", started.elapsed());
+                    return;
+                }
+            },
+            Err(e) => {
+                log::debug!("could not read interface while waiting for handshake: {e}.");
+                return;
+            },
+        }
+
+        if started.elapsed() >= TIMEOUT {
+            log::warn!(
+                "no handshake after {:?}; attempting the request anyway.",
+                TIMEOUT
+            );
+            return;
+        }
+        std::thread::sleep(INTERVAL);
+    }
 }
 
 fn update_keypair(
