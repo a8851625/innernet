@@ -30,6 +30,11 @@ jobs:
   cli-server:
     name: cli+server (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # GitHub only allows container: at job level, not per step. The Linux
+    # targets get a manylinux2014 image so the glibc floor is pinned to 2.17
+    # rather than inherited from the runner image; macOS targets leave it unset
+    # and run directly on the runner.
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
@@ -62,19 +67,16 @@ jobs:
           # targets build for their host default.
           targets: ${{ matrix.target }}
 
-      - name: Install dependencies (Linux, container)
-        # The build itself runs in matrix.container, so the toolchain and
-        # sqlite headers have to be present there too.
+      - name: Verify the toolchain (Linux, container)
+        # Nothing to install: SQLite is compiled in (rusqlite "bundled"), and the
+        # manylinux images already carry a C toolchain. This step exists to make
+        # the build environment visible in the log, since a surprise here is
+        # what would move the glibc floor.
         if: runner.os == 'Linux'
-        container: ${{ matrix.container }}
         run: |
-          if command -v dnf > /dev/null; then
-            dnf install -y sqlite-devel pkgconfig > /dev/null || true
-          elif command -v apt-get > /dev/null; then
-            apt-get update -qq && apt-get install -y libsqlite3-dev pkg-config
-          fi
-          gcc --version | head -1
-          pkg-config --modversion sqlite3 || echo "sqlite3 dev headers not found"
+          echo "glibc: $(ldd --version | head -1)"
+          echo "gcc:   $(gcc --version | head -1)"
+          echo "objdump: $(command -v objdump)"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -85,7 +87,6 @@ jobs:
         # is the whole point of using them. SQLite is vendored for the same
         # reason: linking the system libsqlite3 would drag in whatever glibc the
         # image happens to have.
-        container: ${{ matrix.container }}
         run: cargo build --release --locked --target ${{ matrix.target }} -p innernet -p innernet-server
 
       # Guard against silently shipping a binary that only runs on the build
@@ -93,7 +94,6 @@ jobs:
       # rather than discovering it from a user's "version GLIBC_2.34 not found".
       - name: Assert the glibc floor
         if: runner.os == 'Linux'
-        container: ${{ matrix.container }}
         shell: bash
         run: |
           set -euo pipefail
