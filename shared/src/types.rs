@@ -519,6 +519,16 @@ pub struct NatOpts {
     /// Don't report any candidates to coordinating server.
     /// Shorthand for --exclude-nat-candidates '0.0.0.0/0'.
     pub no_nat_candidates: bool,
+
+    #[clap(long)]
+    /// Report this address as an additional NAT traversal candidate instead of
+    /// asking Quad9 for your public IP.
+    ///
+    /// Candidate reporting normally probes your public address over DNS. That
+    /// probe returns a wrong answer behind a transparent proxy or a DNS-based
+    /// fake-IP resolver, which leaves peers with only unroutable private
+    /// addresses to try. Setting this explicitly overrides the probe.
+    pub public_endpoint: Option<SocketAddr>,
 }
 
 impl NatOpts {
@@ -527,6 +537,7 @@ impl NatOpts {
             no_nat_traversal: true,
             exclude_nat_candidates: vec![],
             no_nat_candidates: true,
+            public_endpoint: None,
         }
     }
 
