@@ -93,6 +93,21 @@ jobs:
 
   # The GUI is a separate workspace with its own lockfile, so it needs its own
   # jobs rather than being picked up by the workspace commands above.
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The installer is POSIX sh; dash on Debian is the strictest common
+      # interpreter, so it is a better check than bash.
+      - name: Syntax check (dash)
+        run: dash -n install.sh
+      - name: Tests
+        run: sh tests/install-test.sh
+      # Homebrew formula: catch syntax errors and missing DSL declarations
+      # without needing a macOS runner or a tap checkout.
+      - name: Formula syntax
+        run: ruby -c homebrew/Formula/innernet.rb
+
   gui:
     runs-on: ${{ matrix.os }}
     strategy:

@@ -98,13 +98,33 @@ jobs:
             rm -rf "$name"
             echo "ARTIFACT=$name.tar.gz" >> "$GITHUB_ENV"
           fi
+
+          # The installer verifies this. Each matrix job produces its own
+          # fragment because jobs run on separate machines; the checksum job
+          # below merges them into one SHA256SUMS.
+          if command -v sha256sum > /dev/null; then
+            sha256sum *.tar.gz *.zip > SHA256SUMS.part 2>/dev/null || true
+          else
+            shasum -a 256 *.tar.gz *.zip > SHA256SUMS.part 2>/dev/null || true
+          fi
           ls -lh
 
       - uses: actions/upload-artifact@v4
         with:
           name: cli-server-${{ matrix.target }}
-          path: dist/*
+          path: |
+            dist/*
+            !dist/SHA256SUMS.part
           if-no-files-found: error
+
+      # Upload the checksum fragment separately so the merge job can find it
+      # without downloading the (much larger) archives.
+      - uses: actions/upload-artifact@v4
+        if: runner.os != 'Windows'
+        with:
+          name: sums-${{ matrix.target }}
+          path: dist/SHA256SUMS.part
+          if-no-files-found: warn
 
       # Attach to the Release when this run was triggered by a tag.
       - name: Upload to Release
@@ -197,6 +217,36 @@ jobs:
           name: gui-${{ matrix.platform }}
           path: dist/*
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Merge the per-platform checksum fragments into one SHA256SUMS and attach it
+  # to the Release. The install script looks for that single file.
+  # ---------------------------------------------------------------------------
+  checksums:
+    name: checksums
+    needs: [cli-server]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sums-*
+          path: fragments
+          merge-multiple: true
+
+      - name: Merge
+        run: |
+          set -euo pipefail
+          # Fragments are "<sha>  <file>"; sorting gives a stable file.
+          cat fragments/SHA256SUMS.part | sort -k2 > SHA256SUMS
+          echo "--- merged ---"
+          cat SHA256SUMS
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SHA256SUMS
+          fail_on_unmatched_files: true
 
   # ---------------------------------------------------------------------------
   # Guards. These do not publish anything; they stop a broken tag from

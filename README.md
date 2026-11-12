@@ -13,6 +13,62 @@ A private network system that uses [WireGuard](https://wireguard.com) under the 
 
 This has not received an independent security audit, and should be considered experimental software at this early point in its lifetime.
 
+## Getting started
+
+Prebuilt binaries for Linux and macOS (x86_64 and arm64) are published on the
+[releases page](https://github.com/a8851625/innernet/releases).
+
+### Homebrew (macOS)
+
+```sh
+brew tap a8851625/innernet
+brew install innernet
+```
+
+This installs the prebuilt binaries, not a source build, so no Rust toolchain
+is needed.
+
+### Install script (Linux and macOS)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/a8851625/innernet/main/install.sh | sh
+```
+
+The script detects your platform, verifies the release checksum, and installs
+`innernet` and `innernet-server`. Options are passed after `sh -s --`:
+
+```sh
+# Pin a version
+curl -fsSL .../install.sh | sh -s -- --version v2.1.0
+
+# Install somewhere else (e.g. no sudo)
+curl -fsSL .../install.sh | sh -s -- --bin-dir ~/.local/bin
+
+# Remove the binaries
+curl -fsSL .../install.sh | sh -s -- --uninstall
+```
+
+Installing leaves `/etc/innernet` and `/var/lib/innernet` in place on
+uninstall: they hold network membership, and re-joining needs a fresh
+invitation.
+
+### Building from source
+
+```sh
+git clone https://github.com/a8851625/innernet
+cd innernet
+cargo build --release -p innernet -p innernet-server
+```
+
+On macOS the client needs a userspace WireGuard implementation
+(`brew install wireguard-go`). Linux uses the kernel module.
+
+### Windows
+
+Not supported yet. The client depends on Unix domain sockets and Linux
+netlink for interface and route management, so it does not build for Windows.
+See [#1](https://github.com/a8851625/innernet/issues) for status.
+
 ## Usage
 
 ### Server Creation
