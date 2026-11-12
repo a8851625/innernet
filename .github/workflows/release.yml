@@ -35,6 +35,10 @@ jobs:
     # rather than inherited from the runner image; macOS targets leave it unset
     # and run directly on the runner.
     container: ${{ matrix.container }}
+    # Experimental targets may fail without failing the workflow, so one flaky
+    # container image cannot cancel the matrix and drop the macOS archives that
+    # the Homebrew formula depends on.
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,9 +57,16 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             container: quay.io/pypa/manylinux_2_28_x86_64
+          # aarch64 Linux is a convenience target, not one anybody is blocked
+          # on, and its manylinux container is the least reliable thing in this
+          # workflow: runs keep dying inside actions/checkout because the image
+          # pull fails, which then cancels the rest of the matrix and drops the
+          # macOS archive that the Homebrew formula needs. Marked experimental so
+          # a failure here does not sink the release.
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             container: quay.io/pypa/manylinux_2_28_aarch64
+            experimental: true
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-latest
@@ -186,6 +197,13 @@ jobs:
         with:
           files: dist/${{ env.ARTIFACT }}
           fail_on_unmatched_files: true
+
+      # An experimental target that failed must not take the release down with
+      # it, but the failure should still be visible in the run summary rather
+      # than swallowed.
+      - name: Note experimental failure
+        if: failure() && matrix.experimental
+        run: echo "::warning::the experimental target ${{ matrix.target }} failed; the release continues without it"
 
   # ---------------------------------------------------------------------------
   # Desktop GUI. Tauri needs each platform's own webview, so one job per OS.
@@ -325,7 +343,15 @@ jobs:
   homebrew:
     name: homebrew formula
     needs: [cli-server, checksums]
-    if: startsWith(github.ref, 'refs/tags/') && !cancelled()
+    # Not `needs` on the whole matrix: the formula only ships the two macOS
+    # archives, so a Linux target failing (or being cancelled for concurrency)
+    # has no bearing on it. The step below re-checks that the macOS archives
+    # are really on the release before touching the tap, which is the property
+    # that actually matters.
+    if: |
+      always() && startsWith(github.ref, 'refs/tags/')
+      && needs.checksums.result == 'success'
+      && needs.cli-server.result != 'skipped'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
