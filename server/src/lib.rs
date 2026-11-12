@@ -55,6 +55,11 @@ pub struct Context {
     pub interface: InterfaceName,
     pub backend: Backend,
     pub public_key: Key,
+    /// The server's internal address and listen port. The web UI needs both to
+    /// build an invitation: the new peer must be told where the coordination
+    /// API lives, and that endpoint is the WireGuard-internal one, not the
+    /// public endpoint external clients use for data.
+    pub internal_endpoint: SocketAddr,
 }
 
 pub struct Session {
@@ -548,6 +553,7 @@ pub async fn serve(
         interface,
         public_key,
         backend: network.backend,
+        internal_endpoint: SocketAddr::new(config.address, config.listen_port),
     };
 
     log::info!("innernet-server {} starting.", VERSION);

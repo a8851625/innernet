@@ -176,6 +176,7 @@ impl Server {
             interface: self.interface,
             endpoints: self.endpoints.clone(),
             public_key: self.public_key.clone(),
+            internal_endpoint: (std::net::Ipv4Addr::new(10, 0, 0, 1), 51820).into(),
             #[cfg(target_os = "linux")]
             backend: Backend::Kernel,
             #[cfg(not(target_os = "linux"))]

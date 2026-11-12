@@ -181,6 +181,30 @@ impl PeerInvitation {
         }
     }
 
+    /// Render the invitation to a string instead of writing it to disk.
+    ///
+    /// Used by the web admin UI, which hands the invitation straight to the
+    /// browser: the private key must not persist on the server, so there is no
+    /// file to write. The preamble matches `save_new` so a user sees the same
+    /// instructions whichever way the invitation was produced.
+    pub fn to_toml(&self) -> Result<String, Error> {
+        Ok(format!(
+            r"# This is an invitation file to an innernet network.
+#
+# To join, you must install innernet.
+# See https://github.com/tonarino/innernet for instructions.
+#
+# If you have innernet, just run:
+#
+#   innernet install <this file>
+#
+# Don't edit the contents below unless you love chaos and dysfunction.
+
+{}",
+            self.interface_config.as_toml()
+        ))
+    }
+
     /// Save a new invitation file, failing if it already exists.
     pub fn save_new(&self, path: impl AsRef<Path>) -> Result<(), io::Error> {
         let mut file = OpenOptions::new()
