@@ -205,6 +205,18 @@ impl DatabasePeer {
         }
     }
 
+    /// Remove the peer from the database outright.
+    ///
+    /// Disabling keeps the row so the address stays reserved; deleting frees it.
+    /// Callers must remove the peer from the WireGuard interface first, since
+    /// that is what actually revokes access.
+    pub fn delete(conn: &Connection, id: i64) -> Result<(), ServerError> {
+        match conn.execute("DELETE FROM peers WHERE id = ?1", params![id])? {
+            0 => Err(ServerError::NotFound),
+            _ => Ok(()),
+        }
+    }
+
     pub fn redeem(&mut self, conn: &Connection, pubkey: &str) -> Result<(), ServerError> {
         if self.is_redeemed {
             return Err(ServerError::Gone);

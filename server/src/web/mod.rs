@@ -337,6 +337,21 @@ fn admin_account(conn: &Connection, token: &str) -> Option<Account> {
 }
 
 /// Push a peer's current database state onto the live WireGuard interface.
+/// Detach a peer from the WireGuard interface.
+pub fn remove_peer(
+    peer: &DatabasePeer,
+    interface: &wireguard_control::InterfaceName,
+    backend: wireguard_control::Backend,
+) -> Result<(), ServerError> {
+    let public_key = wireguard_control::Key::from_base64(&peer.public_key)
+        .map_err(|_| ServerError::WireGuard)?;
+    DeviceUpdate::new()
+        .remove_peer_by_key(&public_key)
+        .apply(interface, backend)
+        .map_err(|_| ServerError::WireGuard)?;
+    Ok(())
+}
+
 pub fn apply_peer(
     conn_peer: &DatabasePeer,
     interface: &wireguard_control::InterfaceName,
@@ -618,15 +633,14 @@ pub async fn handle(
                             &serde_json::json!({ "error": "cannot delete the server peer" }),
                         ));
                     }
-                    let contents = PeerContents {
-                        is_disabled: true,
-                        allowed_subnets: vec![],
-                        ..peer.contents.clone()
-                    };
-                    let mut peer = peer;
-                    peer.update(conn, contents)?;
-                    apply_peer(&peer, &interface, backend)?;
-                    Ok(json(StatusCode::OK, &peer_to_view(&peer)))
+                    // Removing it from the interface is what actually revokes
+                    // access; the row deletion afterwards frees the address.
+                    remove_peer(&peer, &interface, backend)?;
+                    DatabasePeer::delete(conn, id)?;
+                    Ok(json(
+                        StatusCode::OK,
+                        &serde_json::json!({ "ok": true, "id": id }),
+                    ))
                 })(),
 
                 _ => return WebOutcome::Handled(text(StatusCode::NOT_FOUND, "peer route")),
@@ -980,6 +994,58 @@ mod tests {
 
         let err = next_free_ip(&conn, &cidr).unwrap_err();
         assert!(err.contains("no free address"), "got: {err}");
+    }
+
+    /// Deleting must remove the row, not just flip is_disabled: the UI lists
+    /// every row, so a disabled-but-present peer still shows up.
+    #[test]
+    fn deleting_a_peer_removes_the_row_and_frees_the_address() {
+        let conn = test_conn();
+        let cidr = DatabaseCidr::create(
+            &conn,
+            innernet_shared::CidrContents {
+                name: "humans".parse().unwrap(),
+                cidr: "10.60.8.0/24".parse().unwrap(),
+                parent: None,
+            },
+        )
+        .unwrap();
+
+        let peer = DatabasePeer::create(
+            &conn,
+            PeerContents {
+                name: "gone".parse().unwrap(),
+                ip: "10.60.8.1".parse().unwrap(),
+                cidr_id: cidr.id,
+                public_key: wireguard_control::KeyPair::generate().public.to_base64(),
+                endpoint: None,
+                persistent_keepalive_interval: None,
+                is_admin: false,
+                is_disabled: false,
+                is_redeemed: true,
+                invite_expires: None,
+                candidates: vec![],
+                allowed_subnets: vec![],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(DatabasePeer::list(&conn).unwrap().len(), 1);
+        DatabasePeer::delete(&conn, peer.id).unwrap();
+
+        assert!(
+            DatabasePeer::list(&conn).unwrap().is_empty(),
+            "the row must be gone, so the UI stops listing it"
+        );
+        // The address is free again, so a new peer can take it.
+        assert_eq!(next_free_ip(&conn, &cidr).unwrap().to_string(), "10.60.8.1");
+    }
+
+    #[test]
+    fn deleting_a_missing_peer_reports_not_found() {
+        let conn = test_conn();
+        let err = DatabasePeer::delete(&conn, 999).unwrap_err();
+        assert!(matches!(err, ServerError::NotFound), "got: {err:?}");
     }
 
     #[test]
