@@ -264,10 +264,13 @@ fn create_peer(
     let peer = DatabasePeer::create(conn, contents)?;
     apply_peer(&peer, interface, backend)?;
 
-    // Build the invitation. The address is the peer's own address inside the
-    // network, which is what its interface will be configured with.
-    let address =
-        ipnet::IpNet::new(ip, cidr.cidr.prefix_len()).map_err(|_| ServerError::InvalidQuery)?;
+    // Build the invitation. The prefix has to come from the network's root
+    // CIDR, not from the peer's own CIDR: the client turns this into its
+    // interface address, and a /24 here would leave it with a route for
+    // 10.60.1.0/24 only, unable to reach the server at 10.60.0.1. The CLI gets
+    // this right via CidrTree::ip_net_for, which walks up to the root.
+    let root_prefix = root_cidr_prefix(conn)?;
+    let address = ipnet::IpNet::new(ip, root_prefix).map_err(|_| ServerError::InvalidQuery)?;
     let interface_info = InterfaceInfo::new(interface, &keypair, address);
 
     let server_peer = DatabasePeer::get(conn, 1)?;
@@ -312,6 +315,19 @@ fn cidr_to_view(c: &innernet_shared::Cidr) -> CidrView {
 ///
 /// Mirrors what `innernet add-peer` does when `--auto-ip` is given, so a peer
 /// created through the web UI lands on the same address the CLI would choose.
+/// Prefix length of the network's root CIDR, i.e. the one with no parent.
+fn root_cidr_prefix(conn: &Connection) -> Result<u8, ServerError> {
+    let mut cidrs = crate::db::DatabaseCidr::list(conn)?;
+    cidrs.retain(|c| c.parent.is_none());
+    match cidrs.len() {
+        1 => Ok(cidrs[0].cidr.prefix_len()),
+        0 => Err(ServerError::NotFound),
+        // More than one root means the database is malformed; refuse rather
+        // than guessing which one describes the network.
+        _ => Err(ServerError::InvalidQuery),
+    }
+}
+
 fn next_free_ip(
     conn: &Connection,
     cidr: &innernet_shared::Cidr,
@@ -1046,6 +1062,73 @@ mod tests {
         let conn = test_conn();
         let err = DatabasePeer::delete(&conn, 999).unwrap_err();
         assert!(matches!(err, ServerError::NotFound), "got: {err:?}");
+    }
+
+    /// The invitation address must carry the NETWORK's prefix, not the peer's
+    /// CIDR prefix. Getting this wrong leaves the client with a route for its
+    /// own /24 and no way to reach the server at 10.60.0.1, which shows up as
+    /// "connection timed out" during the very install that has to work first.
+    #[test]
+    fn invitation_address_uses_the_root_prefix_not_the_peer_cidr_prefix() {
+        let conn = test_conn();
+        // Root /16, child /24 -- the shape of every real network.
+        let root = DatabaseCidr::create(
+            &conn,
+            innernet_shared::CidrContents {
+                name: "net".parse().unwrap(),
+                cidr: "10.60.0.0/16".parse().unwrap(),
+                parent: None,
+            },
+        )
+        .unwrap();
+        let child = DatabaseCidr::create(
+            &conn,
+            innernet_shared::CidrContents {
+                name: "humans".parse().unwrap(),
+                cidr: "10.60.1.0/24".parse().unwrap(),
+                parent: Some(root.id),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(root_cidr_prefix(&conn).unwrap(), 16);
+
+        let address = ipnet::IpNet::new(
+            "10.60.1.3".parse().unwrap(),
+            root_cidr_prefix(&conn).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(address.prefix_len(), 16, "must not inherit the child's /24");
+        assert_eq!(address.to_string(), "10.60.1.3/16");
+        // The address still sits inside the child CIDR for allocation purposes.
+        let peer_ip: std::net::IpAddr = "10.60.1.3".parse().unwrap();
+        assert!(child.cidr.contains(&peer_ip));
+    }
+
+    #[test]
+    fn root_cidr_prefix_rejects_an_empty_or_ambiguous_database() {
+        let conn = test_conn();
+        assert!(root_cidr_prefix(&conn).is_err(), "no CIDRs at all");
+
+        for name in ["a", "b"] {
+            DatabaseCidr::create(
+                &conn,
+                innernet_shared::CidrContents {
+                    name: name.parse().unwrap(),
+                    cidr: if name == "a" {
+                        "10.62.0.0/16".parse().unwrap()
+                    } else {
+                        "10.63.0.0/16".parse().unwrap()
+                    },
+                    parent: None,
+                },
+            )
+            .unwrap();
+        }
+        assert!(
+            root_cidr_prefix(&conn).is_err(),
+            "two roots is ambiguous, so refuse rather than pick one"
+        );
     }
 
     #[test]
