@@ -1196,7 +1196,7 @@ fn grant_local_access() -> ActionResult {
     // `set -e` plus a final marker echo means a partial failure reports as a
     // failure instead of a cheerful "granted".
     let script = format!(
-        "set -e\n         if ! dscl . -read /Groups/{group} >/dev/null 2>&1; then\n           gid=$(dscl . -list /Groups PrimaryGroupID | awk '{{print $2}}' | sort -n | tail -1)\n           dscl . -create /Groups/{group}\n           dscl . -create /Groups/{group} RealName \"innernet access for {user}\"\n           dscl . -create /Groups/{group} PrimaryGroupID $((gid + 1))\n         fi\n         dseditgroup -o edit -a {user} -t user {group}\n         chgrp -R {group} /etc/innernet /var/lib/innernet\n         chmod -R g+rwX /etc/innernet /var/lib/innernet\n         if [ -d /var/run/wireguard ]; then\n           chgrp -R {group} /var/run/wireguard\n           chmod -R g+rwX /var/run/wireguard\n         fi\n         echo GRANTED-{group}"
+        "set -e\n         if ! dscl . -read /Groups/{group} >/dev/null 2>&1; then\n           gid=$(dscl . -list /Groups PrimaryGroupID | awk '{{print $2}}' | sort -n | tail -1)\n           dscl . -create /Groups/{group}\n           dscl . -create /Groups/{group} RealName \"innernet access for {user}\"\n           dscl . -create /Groups/{group} PrimaryGroupID $((gid + 1))\n         fi\n         dseditgroup -o edit -a {user} -t user {group}\n         chgrp -R {group} /etc/innernet /var/lib/innernet\n         chmod -R g+rwX /etc/innernet /var/lib/innernet\n         if [ -d /var/run/wireguard ]; then\n           chgrp -R everyone /var/run/wireguard\n           chmod g+rw /var/run/wireguard/*.sock\n           chmod g+r /var/run/wireguard/*.name\n         fi\n         echo GRANTED-{group}"
     );
 
     let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
@@ -1312,7 +1312,19 @@ fn run_privileged_capture(binary: &str, args: &[String], quiet: bool) -> Option<
     if quiet {
         let out = Command::new(binary).args(args).output().ok()?;
         if out.status.success() {
-            return Some(String::from_utf8_lossy(&out.stdout).to_string());
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            // Exit 0 is not enough for `show --json`: an unprivileged read
+            // succeeds and returns a well-formed snapshot with
+            // permission_denied set and no interfaces. Returning that as the
+            // answer made every refresh after the first silently replace real
+            // data with an empty shell, which is why the UI went blank once the
+            // initial privileged read was not repeated.
+            let usable = serde_json::from_str::<Snapshot>(&stdout)
+                .map(|s| !s.permission_denied && s.has_live_state())
+                .unwrap_or(true);
+            if usable {
+                return Some(stdout);
+            }
         }
         // Fall through to the prompt: better a prompt than a dead UI.
     }

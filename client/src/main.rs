@@ -66,6 +66,23 @@ struct Opts {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
+    /// Let non-root users read this interface's state
+    ///
+    /// WireGuard creates its control socket readable by root only, and recreates
+    /// it every time the interface comes up -- so a one-off chmod is undone at
+    /// the next boot or daemon restart. Running this from the boot service keeps
+    /// the permissions in place, which is what lets a desktop app show live
+    /// state without asking for an administrator password on every refresh.
+    ///
+    /// The socket is a control channel, not the tunnel: making it group-readable
+    /// lets an allowed account read counters and endpoints, and does not expose
+    /// the WireGuard private key (which lives in the config file).
+    ShareState {
+        /// Group to grant read access to (default: every logged-in user)
+        #[clap(long)]
+        group: Option<String>,
+    },
+
     /// Install a new innernet config
     #[clap(alias = "redeem")]
     Install {
@@ -425,6 +442,18 @@ fn up(
                 &interface,
                 true,
             )?;
+
+            // WireGuard rewrites its control socket every time the interface
+            // comes up, and the new one is root-only again. Re-sharing each
+            // round keeps a desktop app able to read state after a reboot or a
+            // daemon restart, instead of going blank until someone remembers to
+            // run chmod by hand.
+            //
+            // Best effort: a failure here must not stop the tunnel from being
+            // maintained, which is the daemon's actual job.
+            if let Err(e) = share_state(None) {
+                log::warn!("could not share the WireGuard control socket: {e}");
+            }
         }
 
         match loop_interval {
@@ -915,6 +944,84 @@ fn get_server_capabilities(config: &InterfaceConfig) -> Result<ServerCapabilitie
     }
 }
 
+/// Make the WireGuard control sockets readable by non-root accounts.
+///
+/// A desktop app needs to read live state to show anything useful, and the
+/// socket is the only way to do that. WireGuard creates it 0700 root:daemon and
+/// recreates it whenever the interface comes up, so this has to be re-applied
+/// after each start -- which is why it belongs in the boot service rather than
+/// in a one-off command the user runs.
+///
+/// The group defaults to `everyone` on macOS and `users` elsewhere, i.e. any
+/// account already logged in to the machine. That is the right default for a
+/// personal computer: the person at the keyboard is the person who set the
+/// network up. Pass --group to narrow it.
+///
+/// This widens access to the control channel only. The WireGuard private key is
+/// in the config file, which this does not touch.
+fn share_state(group: Option<&str>) -> Result<(), Error> {
+    let base = if Path::new("/var/run/wireguard").exists() {
+        Path::new("/var/run/wireguard")
+    } else {
+        Path::new("/run/wireguard")
+    };
+
+    if !base.exists() {
+        log::info!("{} does not exist yet; nothing to share", base.display());
+        return Ok(());
+    }
+
+    let group = group.unwrap_or(if cfg!(target_os = "macos") {
+        "everyone"
+    } else {
+        "users"
+    });
+
+    let mut changed = 0usize;
+    for entry in std::fs::read_dir(base)?.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // The .name file holds the interface name and the .sock file is the
+        // control socket; both are root-only, and both are needed to enumerate.
+        if !(name.ends_with(".sock") || name.ends_with(".name")) {
+            continue;
+        }
+
+        let out = std::process::Command::new("chgrp")
+            .arg(group)
+            .arg(&path)
+            .output()?;
+        if !out.status.success() {
+            bail!(
+                "chgrp {group} {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+
+        let mode = if name.ends_with(".sock") {
+            "g+rw"
+        } else {
+            "g+r"
+        };
+        let out = std::process::Command::new("chmod")
+            .arg(mode)
+            .arg(&path)
+            .output()?;
+        if !out.status.success() {
+            bail!(
+                "chmod {mode} {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        changed += 1;
+    }
+
+    log::info!("shared {changed} WireGuard control file(s) with group {group}");
+    Ok(())
+}
+
 fn show(
     opts: &Opts,
     short: bool,
@@ -1302,6 +1409,7 @@ fn run(opts: &Opts) -> Result<(), Error> {
             install_opts,
             nat,
         } => install(opts, &hosts, &install_opts, &nat, &invite, listen_port)?,
+        Command::ShareState { group } => share_state(group.as_deref())?,
         Command::Show {
             short,
             tree,
