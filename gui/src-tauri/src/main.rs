@@ -1100,14 +1100,17 @@ fn read_exported_state() -> Option<(Snapshot, String)> {
         // live daemon could know is cleared.
         if snapshot.looks_abandoned() {
             let mut stale = snapshot.without_live_data();
-            // Still report it, so the UI can show a disconnected network
-            // instead of an empty window for a machine that plainly has one
-            // configured.
-            if stale
-                .interfaces
-                .iter()
-                .any(|i| i.service.as_ref().is_some_and(|s| s.installed))
-            {
+            // Report it whenever the machine actually has a network configured,
+            // so the UI shows "heheda-mesh, disconnected" rather than an empty
+            // window.
+            //
+            // The test is "does this file list any interface", not "is a
+            // service installed". By this point `service` has been replaced with
+            // the live answer, which for a disconnected network is
+            // `installed: false` -- so keying on it dropped exactly the snapshot
+            // that needed showing, and the app fell through to a privileged
+            // read that prompts for a password the user should not be seeing.
+            if !stale.interfaces.is_empty() {
                 let version = stale.version.clone();
                 stale.permission_denied = false;
                 return Some((stale, version));

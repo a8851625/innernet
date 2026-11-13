@@ -163,6 +163,85 @@ function setupRule() {
   );
 }
 
+// --- a disconnected network is not a setup problem --------------------------
+//
+// Pressing Disconnect removes the boot service, so `installed` becomes false.
+// The old branch treated that as "needs setup" and showed the authorisation
+// screen -- asking for an administrator password to fix something that only
+// needs the Connect button, for a network the app could already read.
+{
+  const m = html.match(/const unreadable = ([^;\r\n]+);/);
+  if (!m) throw new Error("`unreadable` not found in index.html");
+  // eslint-disable-next-line no-new-func
+  const isUnreadable = new Function("snapshot", `return ${m[1]};`);
+
+  check(
+    isUnreadable({ permission_denied: true, interfaces: [] }) === true,
+    "a permission-denied snapshot is unreadable"
+  );
+  check(
+    isUnreadable({ permission_denied: false, interfaces: [{ name: "heheda-mesh" }] }) === false,
+    "a snapshot the app could read is not unreadable"
+  );
+  check(isUnreadable(null) === false, "no snapshot is not the same as denied");
+
+  // The gate itself, read out of the shipped file. Copying it here would pass
+  // whatever the test said, not whatever the app does -- which is how the
+  // previous version of this block stayed green while the app showed the
+  // authorisation screen after Disconnect.
+  //
+  // The condition contains nested parentheses, so it is extracted by balancing
+  // them rather than with a regex that stops at the first `)`.
+  const marker = "else if (needsSetup";
+  const at = html.indexOf(marker);
+  if (at < 0) throw new Error("the needsSetup branch not found in index.html");
+
+  const open = html.indexOf("(", at + "else if ".length);
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < html.length; i++) {
+    if (html[i] === "(") depth++;
+    else if (html[i] === ")") {
+      depth--;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close < 0) throw new Error("unbalanced parentheses in the needsSetup branch");
+  // Everything after `needsSetup` inside the parens.
+  const condition = html.slice(open + 1, close).replace(/^needsSetup/, "").trim();
+
+  const ifaces = [
+    {
+      name: "heheda-mesh",
+      service: { manager: "launchd", installed: false, running: false, path: "/x.plist" },
+    },
+  ];
+  const needsSetup = ifaces.some((i) => i.service && !i.service.installed);
+  const unreadable = isUnreadable({ permission_denied: false, interfaces: ifaces });
+
+  check(needsSetup, "removing the service does make needsSetup true");
+
+  // Evaluate the real condition with the values a disconnected-but-readable
+  // network produces.
+  // eslint-disable-next-line no-new-func
+  const showsSetup = new Function(
+    "needsSetup",
+    "unreadable",
+    "ifaces",
+    `return !!(needsSetup ${condition});`
+  );
+  check(
+    !showsSetup(needsSetup, unreadable, ifaces),
+    "a readable, non-empty network must NOT be sent to the setup screen"
+  );
+
+  // And the case setup is actually for: nothing readable at all.
+  check(showsSetup(true, true, []), "an unreadable machine with no interfaces does show setup");
+}
+
 let failed = fail > 0;
 console.log(`PASS=${pass} FAIL=${fail}`);
 process.exit(failed ? 1 : 0);

@@ -1731,14 +1731,27 @@ async function load() {
       // a missing field is "unknown", not "not installed".
       const needsSetup = ifaces.some((i) => i.service && !i.service.installed);
 
+      // Setup (the one-off authorisation screen) is for the case where the app
+      // cannot read this machine at all. A network the app *can* read, whose
+      // service simply is not running, is not a setup problem: that is a
+      // disconnected network, and the card already has a Connect button for it.
+      //
+      // Conflating the two is why pressing Disconnect dropped the user onto
+      // "Permission required": removing the service made `installed` false,
+      // which read as "needs setup", which offered an administrator prompt for
+      // something that needs no privileges to fix -- just press Connect.
+      const unreadable = !!(snapshot && snapshot.permission_denied);
+
       if (!ifaces.length && !needsSetup) {
         setRoleChip(null);
-        if (snapshot && snapshot.permission_denied) {
+        if (unreadable) {
           renderSetup({ ...snapshot, binary: state.binary });
         } else {
           renderEmpty(snapshot);
         }
-      } else if (needsSetup) {
+      } else if (needsSetup && (unreadable || !ifaces.length)) {
+        // Nothing readable to show: this really is the first-run/permission
+        // case, and authorising is what unblocks it.
         setRoleChip(null);
         setStatus("warn", "setup needed");
         renderSetup({ ...snapshot, binary: state.binary });
