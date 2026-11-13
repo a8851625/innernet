@@ -159,7 +159,9 @@ jobs:
       # These import the role logic straight out of index.html, so the UI and
       # the test cannot drift apart.
       - name: Role gating tests
-        run: node gui/tests/role-gating.test.mjs
+        run: |
+          node gui/tests/role-gating.test.mjs
+          node gui/tests/unit-variant-args.test.mjs
 
       - name: Build
         working-directory: gui/src-tauri

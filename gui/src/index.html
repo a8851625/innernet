@@ -557,11 +557,17 @@ const ADMIN_ACTIONS = new Set([
 async function run(action, { quiet } = {}) {
   if (!invoke) { toast("Application bridge unavailable", "err"); return null; }
 
+  // A unit variant takes no payload, so serde wants the bare string "up" and
+  // rejects {"up": {}} with "invalid type: map, expected unit". Accept either
+  // shape from callers and remember which one to send.
+  const unit = typeof action === "string";
+  const payload = unit ? { [action]: null } : action;
+
   // Guard at the choke point, not only at the buttons: the button gating above
   // is cosmetic and could be bypassed from the web inspector.
-  const verb = Object.keys(action)[0];
+  const verb = Object.keys(payload)[0];
   if (ADMIN_ACTIONS.has(verb)) {
-    const ifaceName = action[verb] && action[verb].interface;
+    const ifaceName = payload[verb] && payload[verb].interface;
     const iface = ((snapshot && snapshot.interfaces) || []).find((i) => i.name === ifaceName);
     if (iface && !isAdmin(iface)) {
       toast("Not permitted: only network admins can do this.", "err");
@@ -571,7 +577,7 @@ async function run(action, { quiet } = {}) {
 
   setBusy(true);
   try {
-    const res = await invoke("run_action", { action });
+    const res = await invoke("run_action", { action: unit ? action : payload });
     pushLog(!!res.ok, res.command || "", (res.ok ? res.stdout : (res.stderr || "")).trim());
 
     if (!quiet) {
@@ -1557,7 +1563,7 @@ function renderError(state) {
     detail: state.error && needsPriv ? state.error : (state.binary ? "cli: " + state.binary : null),
     actions: needsPriv
       ? [
-          { label: "Authorise…", kind: "primary", onClick: () => run({ up: {} }) },
+          { label: "Authorise…", kind: "primary", onClick: () => run("up") },
           { label: "Retry", onClick: load },
         ]
       : [{ label: "Retry", kind: "primary", onClick: load }],

@@ -322,7 +322,9 @@ jobs:
         run: cargo test --locked
 
       - name: Role gating tests
-        run: node gui/tests/role-gating.test.mjs
+        run: |
+          node gui/tests/role-gating.test.mjs
+          node gui/tests/unit-variant-args.test.mjs
 
       - name: Build bundles
         uses: tauri-apps/tauri-action@v0
