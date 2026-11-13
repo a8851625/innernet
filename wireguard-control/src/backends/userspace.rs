@@ -44,8 +44,20 @@ fn open_socket(name: &InterfaceName) -> io::Result<UnixStream> {
 
 pub fn resolve_tun(name: &InterfaceName) -> io::Result<String> {
     let namefile = get_namefile(name)?;
-    Ok(fs::read_to_string(namefile)
-        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "WireGuard name file can't be read"))?
+    // Preserve the underlying error kind. Collapsing everything to NotFound
+    // makes a permission problem indistinguishable from an absent interface:
+    // the name file is mode 0400 root, so an unprivileged caller gets EACCES,
+    // and callers that only look for NotFound treat the network as missing.
+    Ok(fs::read_to_string(&namefile)
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "WireGuard name file {} can't be read: {e}",
+                    namefile.display()
+                ),
+            )
+        })?
         .trim()
         .to_string())
 }

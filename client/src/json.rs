@@ -259,3 +259,46 @@ mod tests {
         assert_eq!(v["permission_denied"], true);
     }
 }
+
+#[cfg(test)]
+mod permission_tests {
+    /// The socket check must not fire on a machine that simply has no
+    /// WireGuard running: that would turn "no networks" into "no permission"
+    /// and send the GUI to the privileges screen for no reason.
+    #[test]
+    fn missing_socket_dir_is_not_a_permission_problem() {
+        // Exercised indirectly: on a host without /var/run/wireguard the
+        // helper returns false. Guard the shape rather than the host.
+        let base = std::path::Path::new("/var/run/wireguard");
+        if !base.exists() {
+            assert!(!crate::wireguard_socket_denied());
+        }
+    }
+
+    /// Config files are the authoritative record of what is configured, so an
+    /// interface whose socket we cannot open must still be discoverable.
+    #[test]
+    fn configured_interfaces_reads_conf_files() {
+        let dir = std::env::temp_dir().join(format!("innernet-conf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("heheda-mesh.conf"), "").unwrap();
+        std::fs::write(dir.join("other.conf"), "").unwrap();
+        std::fs::write(dir.join("not-a-conf.txt"), "").unwrap();
+
+        let found = crate::configured_interfaces(&dir);
+        let names: Vec<String> = found.iter().map(|n| n.as_str_lossy().to_string()).collect();
+        assert_eq!(names, vec!["heheda-mesh", "other"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_config_dir_yields_no_interfaces() {
+        let dir = std::env::temp_dir().join(format!("innernet-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(crate::configured_interfaces(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

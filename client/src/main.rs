@@ -923,7 +923,15 @@ fn show(
     interface: Option<Interface>,
 ) -> Result<(), Error> {
     let interfaces = interface.map_or_else(
-        || Device::list(opts.network.backend),
+        || match Device::list(opts.network.backend) {
+            // Enumeration silently drops every interface whose socket this
+            // user cannot connect to, which turns "you lack permission" into
+            // "you have no networks". When that happens, fall back to the
+            // config files, which are the authoritative record of what is
+            // configured on this machine.
+            Ok(list) if list.is_empty() => Ok(configured_interfaces(&opts.config_dir)),
+            other => other,
+        },
         |interface| Ok(vec![*interface]),
     )?;
 
@@ -932,11 +940,20 @@ fn show(
         .map(|name| -> Result<Option<_>, Error> {
             match DataStore::open(&opts.data_dir, &name) {
                 Ok(store) => {
-                    let device =
-                        Device::get(&name, opts.network.backend).with_str(name.as_str_lossy())?;
+                    // A socket we may open is not guaranteed -- it is root-only
+                    // (0700) unless the user joins a group. When that happens
+                    // the network still exists and is configured; we simply
+                    // cannot see its live stats. Report it without the device
+                    // rather than failing the whole command, so a GUI can show
+                    // the network and explain what is missing.
+                    let device = match Device::get(&name, opts.network.backend) {
+                        Ok(d) => Some(d),
+                        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => None,
+                        Err(e) => return Err(e.into()),
+                    };
                     let config = InterfaceConfig::from_interface(&opts.config_dir, &name)?;
 
-                    Ok(Some((device, store, config)))
+                    Ok(Some((name, device, store, config)))
                 },
                 // Skip WireGuard interfaces that aren't managed by innernet.
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -954,16 +971,27 @@ fn show(
         // A GUI must be able to tell "no networks configured" apart from
         // "not enough privileges to read the state", otherwise it silently
         // renders an empty list for a user who simply lacks root.
-        let permission_denied = std::fs::read_dir(&opts.config_dir)
+        // Two independent things can hide a network from a normal user.
+        //
+        // The obvious one is the config directory. The sneaky one is the
+        // WireGuard socket: interface enumeration reads /var/run/wireguard,
+        // which is world-readable, so read_dir() succeeds -- but each
+        // candidate is then filtered by open_socket(), and that socket is
+        // mode 0700 root. The result is an empty list with no error at all,
+        // which looks exactly like "this machine has no networks".
+        //
+        // Checking the socket too is what lets a GUI distinguish the two.
+        let config_denied = std::fs::read_dir(&opts.config_dir)
             .err()
             .map(|e| e.kind() == io::ErrorKind::PermissionDenied)
             .unwrap_or(false);
+        let permission_denied = config_denied || wireguard_socket_denied();
 
         let mut interfaces = Vec::with_capacity(devices.len());
-        for (device_info, store, interface_config) in &devices {
+        for (name, device, store, interface_config) in &devices {
             interfaces.push(json::interface_snapshot(
-                &device_info.name.as_str_lossy(),
-                Some(device_info),
+                &name.as_str_lossy(),
+                device.as_ref(),
                 store,
                 interface_config,
             ));
@@ -983,7 +1011,18 @@ fn show(
         return Ok(());
     }
 
-    for (device_info, store, interface_config) in devices {
+    for (name, device_info, store, interface_config) in devices {
+        // Without a device handle we cannot show live stats. Say why instead
+        // of printing nothing, which reads like the network vanished.
+        let Some(device_info) = device_info else {
+            println!(
+                "{}: configured, but not readable by this user \n                   (WireGuard sockets are root-only; join the innernet group or run as root)",
+                name.as_str_lossy().yellow()
+            );
+            continue;
+        };
+        let device_info = &device_info;
+
         let public_key = match &device_info.public_key {
             Some(key) => key.to_base64(),
             None => {
@@ -1021,7 +1060,7 @@ fn show(
             info: None,
         });
 
-        print_interface(&device_info, short || tree)?;
+        print_interface(device_info, short || tree)?;
         peer_states.sort_by_key(|peer| peer.peer.ip);
         let verbose = opts.verbose > 0;
 
@@ -1169,6 +1208,65 @@ fn print_peer(
             }
         }
     }
+}
+
+/// Interfaces that have a config file, whether or not we may talk to them.
+///
+/// The config filename is `<interface>.conf`; the stem is the interface name.
+fn configured_interfaces(config_dir: &std::path::Path) -> Vec<InterfaceName> {
+    let mut found = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(config_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("conf") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if let Ok(name) = stem.parse::<InterfaceName>() {
+                found.push(name);
+            }
+        }
+    }
+    found.sort_by_key(|n| n.as_str_lossy().to_string());
+    found
+}
+
+/// Whether this process can actually talk to the userspace WireGuard sockets.
+///
+/// Returns true only when sockets exist but cannot be opened: a machine with no
+/// WireGuard running at all must keep reporting "no networks" rather than
+/// claiming a permission problem.
+fn wireguard_socket_denied() -> bool {
+    let base = if std::path::Path::new("/var/run/wireguard").exists() {
+        std::path::Path::new("/var/run/wireguard")
+    } else if std::path::Path::new("/run/wireguard").exists() {
+        std::path::Path::new("/run/wireguard")
+    } else {
+        return false;
+    };
+
+    let entries = match std::fs::read_dir(base) {
+        Ok(e) => e,
+        Err(e) => return e.kind() == io::ErrorKind::PermissionDenied,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+            continue;
+        }
+        // Connecting is the operation enumeration performs; a permission error
+        // here is precisely the failure that hides the interface.
+        match std::os::unix::net::UnixStream::connect(&path) {
+            Ok(_) => return false,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return true,
+            Err(_) => {},
+        }
+    }
+
+    false
 }
 
 fn main() {
