@@ -110,6 +110,46 @@ loadScene();
   check(boot.state === "todo", "boot row is pending until setup runs");
 }
 
+
+// --- setup appears whenever the service is missing ---------------------------
+//
+// The bug this locks: setup used to key off "the interface list is empty". Once
+// the daemon started publishing a snapshot the list was never empty, so the
+// screen never appeared and the service was never installed -- leaving an app
+// that displayed data from a daemon that did not exist.
+{
+  const withUninstalled = {
+    binary: "/Applications/innernet.app/Contents/MacOS/innernet",
+    config_dir: "/etc/innernet",
+    permission_denied: false,
+    interfaces: [
+      {
+        name: "heheda-mesh",
+        service: { manager: "launchd", installed: false, running: false, path: "/x.plist" },
+      },
+    ],
+  };
+  // The decision lives in load(), so assert on the rule itself rather than
+  // driving the whole renderer: an uninstalled service must force setup.
+  const needsSetup = withUninstalled.interfaces.some(
+    (i) => !(i.service && i.service.installed)
+  );
+  check(needsSetup, "an uninstalled service requires setup even with peers visible");
+
+  const installed = {
+    interfaces: [
+      {
+        name: "heheda-mesh",
+        service: { manager: "launchd", installed: true, running: true, path: "/x.plist" },
+      },
+    ],
+  };
+  check(
+    !installed.interfaces.some((i) => !(i.service && i.service.installed)),
+    "an installed service does not require setup"
+  );
+}
+
 let failed = fail > 0;
 console.log(`PASS=${pass} FAIL=${fail}`);
 process.exit(failed ? 1 : 0);

@@ -13,6 +13,12 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Snapshot {
     version: String,
+    /// Unix seconds when the snapshot was produced; 0 when the writer is older
+    /// than this field. A file left behind by a daemon that has since stopped
+    /// looks exactly like live data unless the age is checked, which is how the
+    /// app came to show a connected network with no daemon running.
+    #[serde(default)]
+    generated_at: u64,
     config_dir: String,
     permission_denied: bool,
     interfaces: Vec<InterfaceSnapshot>,
@@ -25,6 +31,28 @@ impl Snapshot {
     /// networks, but the device itself is absent -- which on innernet means no
     /// public key. That is the reliable marker: peers can legitimately be zero
     /// on a fresh network, but a device always has a public key.
+    /// Age of this snapshot in seconds, or None if it does not say.
+    ///
+    /// Anything older than a few daemon intervals is not live state: the daemon
+    /// rewrites the file every interval, so a stale file means the daemon is not
+    /// running. Fifty minutes is deliberately generous -- it only has to catch
+    /// "the daemon is gone", not police jitter.
+    fn age_secs(&self) -> Option<u64> {
+        if self.generated_at == 0 {
+            return None;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Some(now.saturating_sub(self.generated_at))
+    }
+
+    /// Whether anything is refreshing this snapshot.
+    fn looks_abandoned(&self) -> bool {
+        matches!(self.age_secs(), Some(age) if age > 3000)
+    }
+
     fn has_live_state(&self) -> bool {
         // "Live state" means the live device was actually read. An interface
         // without a public key was never read -- that is the shape a
@@ -832,6 +860,32 @@ fn cli_path() -> Result<String, String> {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// A snapshot built from config files alone, when the network is configured but
+/// the boot service is not installed.
+///
+/// Returned so the UI can show the setup screen: it knows which network this
+/// machine is meant to join, and that nothing is maintaining it. Built without
+/// touching the WireGuard socket, so it costs no authorisation.
+fn uninstalled_configuration(binary: &str) -> Option<Snapshot> {
+    let out = Command::new(binary)
+        .args(["show", "--json"])
+        .output()
+        .ok()?;
+    let snapshot: Snapshot = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).ok()?;
+    // Only when there is something configured and nothing installed. A machine
+    // with no configuration at all is a different screen (join a network), and
+    // one with a service installed should go on to the privileged read.
+    let configured = snapshot
+        .interfaces
+        .iter()
+        .any(|i| i.service.as_ref().map(|s| !s.installed).unwrap_or(false));
+    if configured {
+        Some(snapshot)
+    } else {
+        None
+    }
+}
+
 /// Read the snapshot the boot daemon publishes, if there is one.
 ///
 /// This is the path that matters. The daemon runs as root and already fetches
@@ -866,6 +920,12 @@ fn read_exported_state() -> Option<(Snapshot, String)> {
         if snapshot.permission_denied || !snapshot.has_live_state() {
             continue;
         }
+        // A file the daemon wrote once and never updated again is the daemon
+        // not running, not a network that is up. Serving it would show peers
+        // as connected while nothing is maintaining the tunnel.
+        if snapshot.looks_abandoned() {
+            continue;
+        }
         let version = snapshot.version.clone();
         return Some((snapshot, version));
     }
@@ -898,6 +958,24 @@ fn get_state() -> StateResult {
                 binary: Some(binary),
             };
         }
+    }
+
+    // No usable snapshot. Before falling back to a privileged read, check the
+    // cheap thing first: is there a configuration at all, and is it installed?
+    //
+    // This matters because the fallback prompts for a password, and prompting
+    // someone who has not finished setting up is both pointless (there is no
+    // service to read yet) and the exact complaint this rewrite exists to fix:
+    // authorisation requests arriving for no visible reason. If setup is
+    // incomplete the app should say so, not ask for a password.
+    if let Some(uninstalled) = uninstalled_configuration(&binary) {
+        return StateResult {
+            ok: true,
+            error: None,
+            needs_privileges: false,
+            snapshot: Some(uninstalled),
+            binary: Some(binary),
+        };
     }
 
     let output = match Command::new(&binary).args(["show", "--json"]).output() {
@@ -2262,6 +2340,7 @@ mod live_state_tests {
     fn snapshot(interfaces: Vec<InterfaceSnapshot>) -> Snapshot {
         Snapshot {
             version: "2.5.1".into(),
+            generated_at: 0,
             config_dir: "/etc/innernet".into(),
             permission_denied: false,
             interfaces,

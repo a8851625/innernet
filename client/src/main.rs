@@ -959,6 +959,13 @@ fn get_server_capabilities(config: &InterfaceConfig) -> Result<ServerCapabilitie
     }
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Write a snapshot of live state where an unprivileged reader can see it.
 ///
 /// This exists because a GUI has no good options on its own. The WireGuard
@@ -1009,6 +1016,7 @@ fn export_state(opts: &Opts, interface: Option<&Interface>) -> Result<(), Error>
 
     let snapshot = json::Snapshot {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        generated_at: unix_now(),
         config_dir: opts.config_dir.display().to_string(),
         permission_denied: false,
         interfaces: snapshots,
@@ -1212,6 +1220,7 @@ fn show(
         }
         let snapshot = json::Snapshot {
             version: env!("CARGO_PKG_VERSION").to_string(),
+            generated_at: unix_now(),
             config_dir: opts.config_dir.display().to_string(),
             permission_denied,
             interfaces,

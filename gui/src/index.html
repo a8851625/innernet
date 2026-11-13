@@ -1714,17 +1714,27 @@ async function load() {
         .filter((p) => p.is_connected && !p.is_you).length;
       const anyUp = ifaces.some((i) => i.is_up);
 
-      if (!ifaces.length) {
+      // Setup is finished when this machine is actually installed, and the only
+      // evidence of that is the boot service -- not a readable peer list.
+      //
+      // This used to key off "the interface list is empty", which stopped
+      // working the moment the daemon started publishing a snapshot: the app
+      // could read state without permissions, so the list was never empty, the
+      // setup screen never appeared, and the service was never installed. The
+      // result was an app showing data from a daemon that did not exist.
+      const needsSetup = ifaces.some((i) => !(i.service && i.service.installed));
+
+      if (!ifaces.length && !needsSetup) {
         setRoleChip(null);
-        // An empty list is ambiguous on macOS. If the CLI can see a configured
-        // interface but the socket is unreadable, this is a permissions
-        // problem, not "you have not joined anything" -- and telling the user
-        // the latter would be a lie that sends them looking for an invitation.
         if (snapshot && snapshot.permission_denied) {
           renderSetup({ ...snapshot, binary: state.binary });
         } else {
           renderEmpty(snapshot);
         }
+      } else if (needsSetup) {
+        setRoleChip(null);
+        setStatus("warn", "setup needed");
+        renderSetup({ ...snapshot, binary: state.binary });
       } else {
         // With several networks the chip reflects the strictest role, so the
         // user never assumes admin rights they lack on some interface.

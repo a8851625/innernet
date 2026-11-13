@@ -15,6 +15,14 @@ use innernet_shared::Cidr;
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
     pub version: String,
+    /// Unix seconds when this snapshot was produced.
+    ///
+    /// Without this a reader cannot tell a snapshot written five seconds ago
+    /// from one written by a daemon that died three days ago, and a stale file
+    /// would be presented as live state -- showing peers "connected" when
+    /// nothing is running. Zero means the writer did not record it.
+    #[serde(default)]
+    pub generated_at: u64,
     /// Directory the state was read from, shown in GUIs for troubleshooting.
     pub config_dir: String,
     /// True when the config directory exists but could not be read, which
@@ -183,6 +191,7 @@ mod tests {
     fn snapshot_serializes_with_stable_keys() {
         let snap = Snapshot {
             version: "2.0.0".into(),
+            generated_at: 0,
             config_dir: "/etc/innernet".into(),
             permission_denied: true,
             interfaces: vec![InterfaceSnapshot {
@@ -249,6 +258,7 @@ mod tests {
     fn empty_snapshot_is_still_valid_json() {
         let snap = Snapshot {
             version: "2.0.0".into(),
+            generated_at: 0,
             config_dir: "/etc/innernet".into(),
             permission_denied: true,
             interfaces: vec![],
