@@ -48,5 +48,36 @@ check(/run\(\{ uninstall_service: \{ interface: iface\.name \} \}\)/.test(html),
 // Disconnecting must not be destructive: the config stays so reconnecting works.
 check(/configuration is kept/i.test(html), "Disconnect says the configuration is kept");
 
+// The checks above only prove the source *says* the right words. This one runs
+// the expression, so a change that keeps the text but inverts the meaning (or
+// reads the wrong field) fails here.
+{
+  const m = html.match(/const connected = (.*?);\n/);
+  if (!m) throw new Error("`connected` not found in index.html");
+  // eslint-disable-next-line no-new-func
+  const isConnected = new Function("svc", `return ${m[1]};`);
+
+  check(
+    isConnected({ manager: "launchd", installed: true, running: true, path: "/x.plist" }) === true,
+    "a running service reads as connected"
+  );
+
+  // The reported bug: the service was removed, but the snapshot on disk still
+  // said running:true. Once the app trusts live service state instead, this
+  // case must render as Connect.
+  check(
+    isConnected({ manager: "launchd", installed: false, running: false, path: "/x.plist" }) === false,
+    "a removed service reads as disconnected"
+  );
+
+  check(
+    isConnected({ manager: "launchd", installed: true, running: false, path: "/x.plist" }) === false,
+    "an installed-but-stopped service reads as disconnected"
+  );
+
+  check(isConnected(undefined) === false, "a missing service reads as disconnected");
+  check(isConnected(null) === false, "a null service reads as disconnected");
+}
+
 console.log(`PASS=${pass} FAIL=${fail}`);
 process.exit(fail > 0 ? 1 : 0);

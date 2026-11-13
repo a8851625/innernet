@@ -161,6 +161,14 @@ fn uninstall_systemd(name: &str) -> Result<(), Error> {
         println!("no service file at {}", path.display());
     }
     let _ = run_quiet("systemctl", &["daemon-reload"]);
+
+    // Same reason as the launchd path: the snapshot describes a daemon that is
+    // no longer running, and leaving it makes a disconnected network still look
+    // connected to anything that reads it.
+    let stale = "/var/run/innernet/state.json";
+    if fs::remove_file(stale).is_ok() {
+        println!("removed {stale}");
+    }
     Ok(())
 }
 
@@ -250,6 +258,20 @@ fn uninstall_launchd(name: &str) -> Result<(), Error> {
         println!("removed {}", path.display());
     } else {
         println!("no service file at {}", path.display());
+    }
+
+    // The snapshot was written by the daemon that just stopped. Leaving it
+    // behind is what made Disconnect look like a no-op: the file still says the
+    // interface is up with peers connected, and a GUI reading it has no way to
+    // know the writer is gone. Removing it makes "disconnected" observable
+    // immediately rather than after the staleness window expires.
+    //
+    // Best effort: a missing file is the normal case on a machine that never
+    // started the tunnel, and failing here would turn a successful disconnect
+    // into an error.
+    let stale = "/var/run/innernet/state.json";
+    if fs::remove_file(stale).is_ok() {
+        println!("removed {stale}");
     }
     Ok(())
 }
@@ -487,6 +509,36 @@ mod status_tests {
             assert!(
                 !s.running || s.installed,
                 "running without installed is inconsistent: {s:?}"
+            );
+        }
+    }
+
+    /// Uninstalling must remove the snapshot the daemon published.
+    ///
+    /// The snapshot is written by the daemon, so once the service is stopped the
+    /// file is a frozen claim that the tunnel is up with peers connected. A GUI
+    /// reading it cannot tell the writer is gone, which is why Disconnect looked
+    /// like it did nothing: peers stayed listed and the switch still offered
+    /// "Disconnect".
+    ///
+    /// Checks the shipped source, because the removal itself needs root and a
+    /// real unit file to exercise. The code must at least name every path it
+    /// intends to delete.
+    #[test]
+    fn uninstall_removes_the_published_snapshot() {
+        let src = include_str!("service.rs");
+
+        for func in ["fn uninstall_launchd", "fn uninstall_systemd"] {
+            let start = src.find(func).unwrap_or_else(|| panic!("{func} missing"));
+            let end = src[start..]
+                .find("\nfn ")
+                .map(|i| start + i)
+                .unwrap_or(src.len());
+            let body = &src[start..end];
+
+            assert!(
+                body.contains("/var/run/innernet/state.json"),
+                "{func} must delete the stale snapshot, or a disconnected network keeps looking connected"
             );
         }
     }

@@ -39,6 +39,24 @@ impl Snapshot {
         self
     }
 
+    /// Strip everything that only a running daemon could have observed.
+    ///
+    /// Applied to a snapshot whose age proves nothing is refreshing it. The
+    /// network is still configured, so the interface entries survive for their
+    /// names and their service state -- but peers, addresses and the up flag
+    /// described a tunnel that no longer exists, and presenting them is what
+    /// made a disconnected network look connected.
+    fn without_live_data(mut self) -> Self {
+        for iface in &mut self.interfaces {
+            iface.is_up = false;
+            iface.peers.clear();
+            iface.public_key = None;
+            iface.me = None;
+            iface.endpoint_overrides.clear();
+        }
+        self
+    }
+
     /// Whether the interfaces carry data read from the WireGuard device.
     ///
     /// A snapshot built without device access still lists the configured
@@ -63,8 +81,19 @@ impl Snapshot {
     }
 
     /// Whether anything is refreshing this snapshot.
+    ///
+    /// The daemon rewrites the file every interval (60s by default), so a file
+    /// older than several intervals means nothing is writing it. The original
+    /// threshold was fifty minutes, reasoning that it "only has to catch the
+    /// daemon is gone". That was wrong in the case that matters: stopping the
+    /// service leaves the file frozen at its last healthy state, and for the
+    /// next fifty minutes the app kept drawing that dead state -- peers listed,
+    /// interface up, "Disconnect" still offered -- as though the tunnel were
+    /// running. Five minutes is five missed intervals: long enough not to fire
+    /// on jitter, short enough that a stopped daemon stops being reported as
+    /// alive.
     fn looks_abandoned(&self) -> bool {
-        matches!(self.age_secs(), Some(age) if age > 3000)
+        matches!(self.age_secs(), Some(age) if age > 300)
     }
 
     fn has_live_state(&self) -> bool {
@@ -101,22 +130,29 @@ struct InterfaceSnapshot {
 }
 
 impl InterfaceSnapshot {
-    /// Fill in the boot-service state from the file the service manager actually
-    /// keys off, when the CLI did not report it.
+    /// Replace the snapshot's boot-service state with what is true right now.
     ///
-    /// `service` arrived in CLI 2.4.0. An older CLI omits it entirely, and the
-    /// UI then could not tell "no service" from "this CLI does not say", which
-    /// left the app pinned to the setup screen on a machine whose daemon was
-    /// running fine.
+    /// Two separate reasons, both of which produced visible bugs:
     ///
-    /// The plist/unit file is the authoritative install marker and is readable
-    /// without privileges on both platforms, so the app can answer the question
-    /// itself instead of depending on the CLI's version.
+    /// 1. `service` arrived in CLI 2.4.0. An older CLI omits it entirely, and
+    ///    the UI then could not tell "no service" from "this CLI does not say",
+    ///    which left the app pinned to the setup screen on a machine whose
+    ///    daemon was running fine.
+    ///
+    /// 2. More importantly, the snapshot is written *by* the daemon. Once the
+    ///    service stops, the file is frozen at its last healthy state: it keeps
+    ///    saying `running: true` with peers attached. Trusting it made
+    ///    Disconnect look broken -- the tunnel was gone, but the app still drew
+    ///    a connected network, still listed peers, and still showed "Disconnect".
+    ///    The service manager is the only thing that knows the answer *now*, so
+    ///    it wins whenever it can be asked, whether or not the CLI reported a
+    ///    value.
+    ///
+    /// Returns the interface unchanged where the platform cannot answer, so an
+    /// unknown state never turns into a fabricated "not installed".
     fn with_local_service_state(mut self) -> Self {
-        if self.service.is_none() {
-            if let Some(status) = local_service_status(&self.name) {
-                self.service = Some(status);
-            }
+        if let Some(status) = local_service_status(&self.name) {
+            self.service = Some(status);
         }
         self
     }
@@ -155,18 +191,54 @@ fn local_service_status(interface: &str) -> Option<ServiceStatus> {
     // A missing parent directory means there is nothing to look at, not that the
     // service is absent for a reason worth reporting.
     #[cfg(not(windows))]
-    path.parent()
-        .filter(|p| p.is_dir())
-        .map(|_| ServiceStatus {
+    path.parent().filter(|p| p.is_dir()).map(|_| {
+        let installed = path.exists();
+        ServiceStatus {
             manager: manager.to_string(),
-            installed: path.exists(),
-            // Running state stays with the CLI: asking launchctl/systemctl is
-            // the CLI's job, and guessing here would report a stopped service as
-            // running. `installed` is what the setup gate needs; `running` only
-            // affects the status line, which the CLI fills in when it can.
-            running: false,
+            installed,
+            // Ask the service manager directly. This is the difference between
+            // "the snapshot said running" and "it is running now": the snapshot
+            // is written by the daemon, so once the service is stopped the file
+            // is frozen at its last healthy state and keeps claiming the tunnel
+            // is up. Reading it back is how Disconnect appeared to do nothing --
+            // the peers were still listed, and the button still said Disconnect,
+            // because the data predated the disconnect.
+            running: installed && service_manager_says_running(interface),
             path: path.display().to_string(),
-        })
+        }
+    })
+}
+
+/// Ask launchd/systemd whether the unit is loaded and running right now.
+///
+/// Cheap, unprivileged, and authoritative -- unlike the snapshot, which is a
+/// record of a moment that may have passed. A non-zero exit means "not loaded",
+/// which is a normal answer here, not an error to surface.
+#[cfg(target_os = "macos")]
+fn service_manager_says_running(interface: &str) -> bool {
+    let label = format!("system/com.innernet.{interface}");
+    match Command::new("launchctl").args(["print", &label]).output() {
+        Ok(out) if out.status.success() => {
+            // A loaded job can be waiting rather than running; only "running"
+            // means the tunnel is actually up.
+            String::from_utf8_lossy(&out.stdout).contains("state = running")
+        },
+        _ => false,
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows)))]
+fn service_manager_says_running(interface: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", &format!("innernet@{interface}.service")])
+        .output()
+        .map(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "active")
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn service_manager_says_running(_interface: &str) -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1017,10 +1089,29 @@ fn read_exported_state() -> Option<(Snapshot, String)> {
         if snapshot.permission_denied || !snapshot.has_live_state() {
             continue;
         }
-        // A file the daemon wrote once and never updated again is the daemon
-        // not running, not a network that is up. Serving it would show peers
-        // as connected while nothing is maintaining the tunnel.
+        // A file the daemon wrote once and never updated again means the daemon
+        // is not running. Serving it verbatim would show peers as connected
+        // while nothing maintains the tunnel -- the bug where Disconnect left
+        // the peer list populated and the button still offering "Disconnect".
+        //
+        // Discarding it entirely is not right either: the config is still here,
+        // the network still exists, and the honest state is "disconnected". So
+        // the interface list is kept for its names, and everything that only a
+        // live daemon could know is cleared.
         if snapshot.looks_abandoned() {
+            let mut stale = snapshot.without_live_data();
+            // Still report it, so the UI can show a disconnected network
+            // instead of an empty window for a machine that plainly has one
+            // configured.
+            if stale
+                .interfaces
+                .iter()
+                .any(|i| i.service.as_ref().is_some_and(|s| s.installed))
+            {
+                let version = stale.version.clone();
+                stale.permission_denied = false;
+                return Some((stale, version));
+            }
             continue;
         }
         let version = snapshot.version.clone();
@@ -2558,20 +2649,91 @@ mod live_state_tests {
     /// cannot. Clobbering a real answer with the fallback would make a stopped
     /// service look stopped-but-installed when the CLI had better information.
     #[test]
-    fn cli_reported_service_state_wins_over_the_filesystem() {
+    fn live_service_state_wins_over_the_snapshot() {
         let mut i = iface(Some("pubkey"), vec![]);
-        let reported = ServiceStatus {
+        // What a snapshot written before Disconnect still claims.
+        let stale = ServiceStatus {
             manager: "launchd".into(),
             installed: true,
             running: true,
             path: "/Library/LaunchDaemons/com.innernet.heheda-mesh.plist".into(),
         };
-        i.service = Some(reported.clone());
+        i.service = Some(stale);
 
         let resolved = i.with_local_service_state();
-        let svc = resolved.service.expect("service stays present");
-        assert_eq!(svc.installed, reported.installed);
-        assert_eq!(svc.running, reported.running, "running must survive");
-        assert_eq!(svc.path, reported.path);
+
+        // `heheda-mesh` has no launchd unit on any machine running these tests,
+        // so the service manager must report it as not running. Asserting the
+        // snapshot value "survives" is exactly the bug: it kept Disconnect
+        // looking like a no-op.
+        #[cfg(not(windows))]
+        {
+            let svc = resolved.service.expect("service state is resolved locally");
+            assert!(
+                !svc.running,
+                "a snapshot's `running: true` must not outlive the service"
+            );
+            assert!(
+                !svc.installed,
+                "nor its `installed: true`, when no unit file exists"
+            );
+        }
+    }
+
+    /// A disconnected network must not keep showing live tunnel data.
+    ///
+    /// This is the reported bug: Disconnect removed the service, but the
+    /// snapshot left on disk still listed four peers with handshake times and
+    /// claimed the interface was up, so the window looked unchanged and the
+    /// switch still offered "Disconnect".
+    #[test]
+    fn an_abandoned_snapshot_keeps_the_network_but_drops_tunnel_data() {
+        let mut i = iface(Some("pubkey"), vec![peer("mac-office")]);
+        i.endpoint_overrides = vec![];
+        let s = snapshot(vec![i]);
+
+        // Sanity: the fixture really does carry live-looking data.
+        assert!(s.has_live_state(), "fixture must start as live state");
+        assert_eq!(s.interfaces[0].peers.len(), 1);
+
+        let stripped = s.without_live_data();
+
+        // The network survives, so the UI can say "heheda-mesh, disconnected".
+        assert_eq!(stripped.interfaces.len(), 1);
+        assert_eq!(stripped.interfaces[0].name, "heheda-mesh");
+
+        // Everything only a running daemon could know is gone.
+        assert!(!stripped.interfaces[0].is_up, "must not claim the tunnel is up");
+        assert!(
+            stripped.interfaces[0].peers.is_empty(),
+            "must not list peers for a tunnel that is not running"
+        );
+        assert!(stripped.interfaces[0].public_key.is_none());
+        assert!(!stripped.has_live_state(), "this is not live state any more");
+    }
+
+    /// The staleness window has to be short enough to notice a stopped daemon.
+    ///
+    /// The daemon rewrites the snapshot every 60s. With the old 3000s threshold
+    /// a disconnected network stayed "running" for fifty minutes.
+    #[test]
+    fn staleness_window_is_a_few_daemon_intervals() {
+        // 60s daemon interval; four missed refreshes must count as abandoned.
+        let mut s = snapshot(vec![iface(Some("pubkey"), vec![])]);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        s.generated_at = now - 240; // 4 minutes: still fresh
+        assert!(!s.looks_abandoned(), "four minutes is not abandoned");
+
+        s.generated_at = now - 600; // 10 minutes: five missed refreshes
+        assert!(s.looks_abandoned(), "ten minutes must count as abandoned");
+
+        // A writer that predates the field cannot be aged at all; it must not be
+        // treated as ancient by default.
+        s.generated_at = 0;
+        assert!(!s.looks_abandoned(), "unknown age is not the same as old");
     }
 }
