@@ -117,36 +117,49 @@ loadScene();
 // the daemon started publishing a snapshot the list was never empty, so the
 // screen never appeared and the service was never installed -- leaving an app
 // that displayed data from a daemon that did not exist.
+//
+// The rule is read out of the shipped index.html rather than restated here. An
+// earlier version of this test re-implemented the predicate, so when the real
+// one was `!(i.service && i.service.installed)` -- true for every interface
+// whenever the CLI omitted `service`, pinning users to the setup screen -- the
+// test still passed. A test that copies the code it checks cannot catch a bug
+// in that code.
+function setupRule() {
+  const m = html.match(/const needsSetup = (.*?);\n/);
+  if (!m) throw new Error("needsSetup not found in index.html");
+  // eslint-disable-next-line no-new-func
+  return new Function("ifaces", `return ${m[1]};`);
+}
+
 {
-  const withUninstalled = {
-    binary: "/Applications/innernet.app/Contents/MacOS/innernet",
-    config_dir: "/etc/innernet",
-    permission_denied: false,
-    interfaces: [
+  const needsSetupFor = setupRule();
+
+  check(
+    needsSetupFor([
       {
         name: "heheda-mesh",
         service: { manager: "launchd", installed: false, running: false, path: "/x.plist" },
       },
-    ],
-  };
-  // The decision lives in load(), so assert on the rule itself rather than
-  // driving the whole renderer: an uninstalled service must force setup.
-  const needsSetup = withUninstalled.interfaces.some(
-    (i) => !(i.service && i.service.installed)
+    ]),
+    "an uninstalled service requires setup even with peers visible"
   );
-  check(needsSetup, "an uninstalled service requires setup even with peers visible");
 
-  const installed = {
-    interfaces: [
+  check(
+    !needsSetupFor([
       {
         name: "heheda-mesh",
         service: { manager: "launchd", installed: true, running: true, path: "/x.plist" },
       },
-    ],
-  };
-  check(
-    !installed.interfaces.some((i) => !(i.service && i.service.installed)),
+    ]),
     "an installed service does not require setup"
+  );
+
+  // The regression that shipped: CLI 2.5.1 has no `service` key at all. The app
+  // cannot tell "not installed" from "this CLI does not say", and choosing the
+  // former traps a working machine on the setup screen forever.
+  check(
+    !needsSetupFor([{ name: "heheda-mesh" }]),
+    "a CLI that omits `service` must not be read as 'not installed'"
   );
 }
 

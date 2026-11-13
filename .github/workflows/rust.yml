@@ -10,9 +10,25 @@ on:
     branches:
       - "*"
 
+# One run per ref. This repo releases many times an hour, and without a
+# concurrency group every push queued its own full matrix -- including the
+# 10-minute macOS Tauri build. The queue is what pushed individual jobs into the
+# platform's 15-minute cutoff: they were cancelled for lack of a runner, not
+# because the code was slow.
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # Explicit budget per job. Without one, a macOS runner that stalls is only
+    # stopped by the platform's own cutoff (observed at exactly 15m01s,
+    # cancelled rather than failed), which reports as "cancelled" and hides the
+    # real cause. A declared timeout makes a stall a normal failure with a clear
+    # message, and keeps a wedged job from occupying a runner for the default
+    # six hours.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -35,14 +51,19 @@ jobs:
       # wireguard-control's device test needs a userspace WireGuard binary,
       # which CI does not provision. It is excluded rather than allowed to
       # fail: everything else still runs and must pass.
+      #
+      # No --verbose: it prints every rustc invocation, which is tens of
+      # thousands of lines per job. On the macOS runner that logging cost was a
+      # measurable share of wall time, and it never once helped diagnose a
+      # failure here -- the assertions themselves carry the message.
       - name: Build
-        run: cargo build --workspace --locked --verbose
+        run: cargo build --workspace --locked
 
       - name: Test
-        run: cargo test --workspace --locked --verbose --exclude wireguard-control
+        run: cargo test --workspace --locked --exclude wireguard-control
 
       - name: Test (IPv6)
-        run: cargo test --workspace --locked --features v6-test --verbose --exclude wireguard-control
+        run: cargo test --workspace --locked --features v6-test --exclude wireguard-control
 
   fmt:
     runs-on: ubuntu-latest
@@ -130,6 +151,11 @@ jobs:
 
   gui:
     runs-on: ${{ matrix.os }}
+    # Same reason as the `test` job: macOS Tauri builds are the slow leg and
+    # were being cancelled at 15m01s with no diagnosis. Give the real work room
+    # (a cold Tauri build plus tests lands around 10-12 minutes) and make a
+    # hang an explicit failure instead.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:

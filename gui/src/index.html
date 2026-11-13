@@ -1722,7 +1722,14 @@ async function load() {
       // could read state without permissions, so the list was never empty, the
       // setup screen never appeared, and the service was never installed. The
       // result was an app showing data from a daemon that did not exist.
-      const needsSetup = ifaces.some((i) => !(i.service && i.service.installed));
+      //
+      // `service` only exists in `show --json` from CLI 2.4.0 onwards. Written
+      // as `!(i.service && i.service.installed)` this was true for every
+      // interface whenever the field was missing, so an older CLI pinned the app
+      // to the setup screen forever -- even on a machine whose boot service was
+      // installed and running. Only claim setup is needed on positive evidence;
+      // a missing field is "unknown", not "not installed".
+      const needsSetup = ifaces.some((i) => i.service && !i.service.installed);
 
       if (!ifaces.length && !needsSetup) {
         setRoleChip(null);

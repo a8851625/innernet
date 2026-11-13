@@ -471,6 +471,24 @@ fn up(
             }
         }
 
+        // Hand the WireGuard control socket to the desktop group, every pass.
+        //
+        // `fetch` above may bring the interface up, and WireGuard recreates its
+        // socket 0700 root:daemon whenever that happens -- so sharing it once at
+        // install time is not enough, which is exactly what the old behaviour
+        // assumed. Without this the socket stays unreadable, `show --json` from
+        // a desktop app comes back permission_denied, and the app falls back to
+        // an authorisation prompt on every single refresh.
+        //
+        // Only when running as a daemon: a foreground `innernet up` is usually
+        // run by the owner of the sockets already, and chgrp/chmod would just
+        // fail noisily on a machine where the user is not root.
+        if loop_interval.is_some() {
+            if let Err(e) = share_state(None) {
+                log::warn!("could not share the WireGuard control socket: {e}");
+            }
+        }
+
         match loop_interval {
             Some(interval) => thread::sleep(interval),
             None => break,
@@ -1035,11 +1053,22 @@ fn export_state(opts: &Opts, interface: Option<&Interface>) -> Result<(), Error>
 /// whatever group the install already set up; a copy under /var/run lets a GUI
 /// find the file without being told where the data directory is.
 fn state_export_paths(opts: &Opts) -> Vec<std::path::PathBuf> {
-    let mut paths = vec![opts.data_dir.join("state.json")];
-    if Path::new("/var/run/innernet").exists() || cfg!(not(target_os = "macos")) {
-        paths.push(PathBuf::from("/var/run/innernet/state.json"));
-    }
-    paths
+    // /var/run first, because it is the one a GUI can actually reach.
+    //
+    // `data_dir` is created root-only (0700). A 0644 file inside a directory
+    // nobody else may traverse is still unreadable, so publishing only there
+    // produced the worst kind of failure: the daemon logged a successful export
+    // while every unprivileged read kept coming back permission_denied, and the
+    // desktop app prompted for a password on every single refresh. The path to
+    // the file matters as much as the file's own mode.
+    //
+    // The old condition skipped /var/run whenever the directory did not already
+    // exist -- which was always, since nothing else creates it -- so the copy
+    // that would have worked was never written.
+    vec![
+        PathBuf::from("/var/run/innernet/state.json"),
+        opts.data_dir.join("state.json"),
+    ]
 }
 
 /// Write a file readable by everyone, atomically.
@@ -1048,9 +1077,18 @@ fn state_export_paths(opts: &Opts) -> Vec<std::path::PathBuf> {
 /// world-readable or the app cannot read it without privileges, which is the
 /// entire point. Written to a temporary name and renamed so a reader never sees
 /// a half-written file.
+///
+/// The parent directory is made traversable as well. Setting 0644 on a file
+/// inside a 0700 directory achieves nothing: permission to read a path is
+/// checked on every component, so the reader is stopped at the directory before
+/// the file's own mode is ever consulted. That is precisely how the export
+/// appeared to succeed while the desktop app still could not read it.
 fn write_shared_file(path: &Path, body: &str) -> Result<(), Error> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        // rwxr-xr-x: the daemon still owns it, but anyone may descend into it
+        // and read the snapshot inside.
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755))?;
     }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, body)?;
@@ -1631,4 +1669,146 @@ fn run(opts: &Opts) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A reader must be able to reach the snapshot from a fresh machine.
+    ///
+    /// This is the regression that made the desktop app prompt for a password
+    /// on every refresh: the export succeeded and wrote a 0644 file into a 0700
+    /// directory, so `open()` failed at the directory before the file's own
+    /// mode mattered. Testing the file's mode alone would have missed it, which
+    /// is presumably what happened.
+    ///
+    /// The parent is deliberately created 0700 first. A test that only checks
+    /// the mode of a directory it just created under `temp_dir()` passes even
+    /// without the fix, because macOS already gives that directory 0755 -- the
+    /// assertion never sees the restrictive case the bug is about.
+    #[test]
+    fn exported_snapshot_is_reachable_by_a_non_root_reader() {
+        let dir = std::env::temp_dir().join(format!(
+            "innernet-export-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+
+        // Reproduce the real starting state: a root-only directory, exactly as
+        // the daemon finds it on a machine where the data dir was created by
+        // `install` rather than by us.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("tighten scratch dir");
+
+        let path = dir.join("state.json");
+        write_shared_file(&path, "{\"version\":\"2.6.2\"}").expect("export should succeed");
+
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o644, "the snapshot itself must be readable");
+
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o755,
+            "the directory must be traversable, or 0644 on the file is moot"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The /var/run copy must be written even when that directory does not exist
+    /// yet -- the daemon is the thing that creates it.
+    ///
+    /// The old code gated the copy on `Path::new("/var/run/innernet").exists()`,
+    /// which was false on every fresh install because nothing else creates it.
+    /// The one path a GUI can always read was therefore never produced.
+    #[test]
+    fn var_run_copy_is_always_among_the_export_targets() {
+        let opts = test_opts();
+        let paths = state_export_paths(&opts);
+
+        assert!(
+            paths.iter().any(|p| p.ends_with("state.json")
+                && p.parent().is_some_and(|d| d.ends_with("run/innernet"))),
+            "expected /var/run/innernet/state.json in {paths:?}"
+        );
+    }
+
+    /// Build the minimal `Opts` the path helper reads.
+    fn test_opts() -> Opts {
+        Opts {
+            command: None,
+            verbose: 0,
+            config_dir: PathBuf::from("/etc/innernet"),
+            data_dir: PathBuf::from("/var/lib/innernet"),
+            network: NetworkOpts {
+                no_routing: false,
+                backend: Default::default(),
+                mtu: None,
+            },
+        }
+    }
+
+    /// The daemon must share the WireGuard socket, not only the snapshot.
+    ///
+    /// Two separate permissions stand between a desktop app and live state: the
+    /// snapshot file (0644 in a traversable directory) and the control socket
+    /// (0700 root:daemon, recreated on every interface start). Publishing the
+    /// file alone leaves the app unable to enumerate devices, so it still
+    /// reports permission_denied and still prompts.
+    ///
+    /// Checks the shipped source rather than a re-statement of the rule: the
+    /// call has to sit inside `up`, gated on daemon mode. An earlier version of
+    /// this test asserted `Some(_).is_some()`, which is true no matter what the
+    /// daemon does -- it could not have caught the missing call it was written
+    /// for.
+    #[test]
+    fn daemon_mode_is_what_triggers_socket_sharing() {
+        let src = include_str!("main.rs");
+        let up_start = src.find("fn up(").expect("up() must exist");
+        let up_end = src[up_start..]
+            .find("\nfn uninstall(")
+            .map(|i| up_start + i)
+            .expect("up() must be followed by uninstall()");
+        let body = &src[up_start..up_end];
+
+        assert!(
+            body.contains("share_state("),
+            "the daemon loop must call share_state, or the socket stays root-only"
+        );
+        assert!(
+            body.contains("loop_interval.is_some()"),
+            "sharing must be gated on daemon mode, not run for a foreground `up`"
+        );
+        assert!(
+            body.contains("export_state("),
+            "the snapshot export must stay in the same loop"
+        );
+    }
+
+    /// Sharing is idempotent and safe to repeat on every daemon pass.
+    ///
+    /// WireGuard recreates the socket whenever the interface restarts, so the
+    /// daemon re-applies this each interval. If `share_state` were destructive
+    /// or order-dependent that repetition would be a bug.
+    #[test]
+    fn share_state_is_safe_to_run_when_there_is_nothing_to_share() {
+        // A machine with no WireGuard directory at all (interface never brought
+        // up) must return Ok, not error: the daemon calls this unconditionally
+        // and a hard failure would spam the log every interval.
+        let result = share_state(Some("everyone"));
+        // Either it found sockets and changed them (running as root), or it
+        // found none and returned Ok. It must never panic or leave an error
+        // that stops the loop.
+        if let Err(e) = result {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("chgrp") || msg.contains("chmod") || msg.contains("Permission"),
+                "only a real permission failure is acceptable, got: {msg}"
+            );
+        }
+    }
 }

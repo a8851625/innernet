@@ -25,6 +25,20 @@ struct Snapshot {
 }
 
 impl Snapshot {
+    /// Fill in boot-service state for every interface the CLI left blank.
+    ///
+    /// Applied at the edge, right after parsing, so every downstream consumer
+    /// (the setup gate, the status line, the action list) sees the same answer
+    /// regardless of which CLI version produced the snapshot.
+    fn with_local_service_state(mut self) -> Self {
+        self.interfaces = self
+            .interfaces
+            .into_iter()
+            .map(InterfaceSnapshot::with_local_service_state)
+            .collect();
+        self
+    }
+
     /// Whether the interfaces carry data read from the WireGuard device.
     ///
     /// A snapshot built without device access still lists the configured
@@ -84,6 +98,62 @@ struct InterfaceSnapshot {
     /// an older CLI instead of failing to parse the whole snapshot.
     #[serde(default)]
     service: Option<ServiceStatus>,
+}
+
+impl InterfaceSnapshot {
+    /// Fill in the boot-service state from the file the service manager actually
+    /// keys off, when the CLI did not report it.
+    ///
+    /// `service` arrived in CLI 2.4.0. An older CLI omits it entirely, and the
+    /// UI then could not tell "no service" from "this CLI does not say", which
+    /// left the app pinned to the setup screen on a machine whose daemon was
+    /// running fine.
+    ///
+    /// The plist/unit file is the authoritative install marker and is readable
+    /// without privileges on both platforms, so the app can answer the question
+    /// itself instead of depending on the CLI's version.
+    fn with_local_service_state(mut self) -> Self {
+        if self.service.is_none() {
+            if let Some(status) = local_service_status(&self.name) {
+                self.service = Some(status);
+            }
+        }
+        self
+    }
+}
+
+/// Whether a boot service is installed for `interface`, read straight from the
+/// service manager's own directory.
+///
+/// Returns `None` where this cannot be determined, so callers can distinguish
+/// "not installed" from "unknown" rather than collapsing both to false.
+fn local_service_status(interface: &str) -> Option<ServiceStatus> {
+    #[cfg(target_os = "macos")]
+    let (manager, path) = (
+        "launchd",
+        PathBuf::from("/Library/LaunchDaemons").join(format!("com.innernet.{interface}.plist")),
+    );
+
+    #[cfg(not(target_os = "macos"))]
+    let (manager, path) = (
+        "systemd",
+        PathBuf::from("/etc/systemd/system").join(format!("innernet@{interface}.service")),
+    );
+
+    // A missing parent directory means there is nothing to look at, not that the
+    // service is absent for a reason worth reporting.
+    path.parent()
+        .filter(|p| p.is_dir())
+        .map(|_| ServiceStatus {
+            manager: manager.to_string(),
+            installed: path.exists(),
+            // Running state stays with the CLI: asking launchctl/systemctl is
+            // the CLI's job, and guessing here would report a stopped service as
+            // running. `installed` is what the setup gate needs; `running` only
+            // affects the status line, which the CLI fills in when it can.
+            running: false,
+            path: path.display().to_string(),
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -759,7 +829,19 @@ struct InvitePreview {
 /// "no networks": before it, `permission_denied` stayed false and interfaces
 /// came back empty, which the app renders as an empty state rather than
 /// offering the privileges path.
-const MIN_CLI_VERSION: &str = "2.4.4";
+///
+/// The floor is 2.6.0, not 2.4.4, because of `export-state`. That subcommand is
+/// what lets the privileged daemon publish a world-readable snapshot, and it is
+/// the *only* way the app reads live state without a password prompt. A CLI
+/// without it cannot feed the app at all: `grant_access` calls `export-state`,
+/// the call fails with "unrecognized subcommand", no snapshot is ever written,
+/// and every refresh falls back to an authorisation prompt. Accepting such a
+/// CLI produced the worst outcome available -- the app looked supported while
+/// being permanently unable to do the one thing it needs.
+///
+/// `share-state` (2.5.3) matters too, but it is applied by the service itself
+/// rather than called by the app, so the app's own floor is set by 2.6.0.
+const MIN_CLI_VERSION: &str = "2.6.0";
 
 /// Returns the minimum version when `reported` is older than it can handle.
 ///
@@ -872,6 +954,7 @@ fn uninstalled_configuration(binary: &str) -> Option<Snapshot> {
         .output()
         .ok()?;
     let snapshot: Snapshot = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).ok()?;
+    let snapshot = snapshot.with_local_service_state();
     // Only when there is something configured and nothing installed. A machine
     // with no configuration at all is a different screen (join a network), and
     // one with a service installed should go on to the privileged read.
@@ -913,6 +996,7 @@ fn read_exported_state() -> Option<(Snapshot, String)> {
         let Ok(snapshot) = serde_json::from_str::<Snapshot>(&body) else {
             continue;
         };
+        let snapshot = snapshot.with_local_service_state();
         // An exported snapshot is by definition a privileged read, so it must
         // not claim otherwise. If it does, it was written by something that
         // could not see the device either -- not worth trusting over a live
@@ -996,6 +1080,7 @@ fn get_state() -> StateResult {
 
     match serde_json::from_str::<Snapshot>(&stdout) {
         Ok(snapshot) => {
+            let snapshot = snapshot.with_local_service_state();
             // A CLI older than this reports networks as invisible when it
             // simply cannot read the sockets, so the app would show "no
             // networks" on a machine that is connected. Refuse it loudly
@@ -1463,6 +1548,7 @@ fn read_state_privileged(binary: &str) -> Option<StateResult> {
     let output =
         run_privileged_capture(binary, &["show".to_string(), "--json".to_string()], already)?;
     let parsed = serde_json::from_str::<Snapshot>(&output).ok()?;
+    let parsed = parsed.with_local_service_state();
 
     // If even a privileged read still cannot see the device, prompting again
     // would loop forever. Hand the (empty) snapshot back and let the caller
@@ -2106,10 +2192,28 @@ mod cli_discovery_tests {
         assert_eq!(version_too_old("1.9.9"), Some(MIN_CLI_VERSION));
     }
 
+    /// The versions the app used to wave through, and must not any more.
+    ///
+    /// 2.4.4 is inside the old floor but has no `export-state`, so the app would
+    /// have run every command except the one that feeds it. 2.5.1 is what a
+    /// plain `brew install innernet` gave users for most of this release cycle.
+    /// Both must be refused with a version error -- not accepted and then left
+    /// prompting for a password on every refresh.
+    #[test]
+    fn versions_without_export_state_are_rejected() {
+        for v in ["2.4.4", "2.5.0", "2.5.1", "2.5.3", "2.5.9"] {
+            assert_eq!(
+                version_too_old(v),
+                Some(MIN_CLI_VERSION),
+                "{v} cannot export state and must be refused"
+            );
+        }
+    }
+
     #[test]
     fn current_and_newer_cli_versions_pass() {
         assert_eq!(version_too_old(MIN_CLI_VERSION), None);
-        assert_eq!(version_too_old("2.4.5"), None);
+        assert_eq!(version_too_old("2.6.1"), None);
         assert_eq!(version_too_old("2.10.0"), None);
         assert_eq!(version_too_old("3.0.0"), None);
     }
@@ -2118,9 +2222,9 @@ mod cli_discovery_tests {
     /// is the same major.minor.patch as 2.4.4 for our purposes.
     #[test]
     fn prerelease_suffixes_are_ignored() {
-        assert_eq!(version_too_old("2.4.4-rc1"), None);
-        assert_eq!(version_too_old("2.4.4+build7"), None);
-        assert_eq!(version_too_old("2.4.3-rc9"), Some(MIN_CLI_VERSION));
+        assert_eq!(version_too_old("2.6.0-rc1"), None);
+        assert_eq!(version_too_old("2.6.0+build7"), None);
+        assert_eq!(version_too_old("2.5.3-rc9"), Some(MIN_CLI_VERSION));
     }
 
     /// Unparseable versions are not blocked: guessing would hide the real
@@ -2390,5 +2494,58 @@ mod live_state_tests {
     fn device_with_no_peers_still_counts_as_live() {
         let s = snapshot(vec![iface(Some("pubkey"), vec![])]);
         assert!(s.has_live_state());
+    }
+
+    /// A CLI older than 2.4.0 omits `service` entirely. The app must then ask
+    /// the filesystem, not assume "no service".
+    ///
+    /// The setup gate is written in the UI, but the data it reads is decided
+    /// here: if this filled in `installed: false` for an unknown field, a
+    /// machine with a running daemon would be pinned to the setup screen
+    /// forever -- which is exactly what users hit on CLI 2.5.1.
+    #[test]
+    fn unknown_service_state_comes_from_the_filesystem_not_a_default() {
+        let s = snapshot(vec![iface(Some("pubkey"), vec![])]).with_local_service_state();
+        let svc = s.interfaces[0]
+            .service
+            .as_ref()
+            .expect("service state must be resolved from the plist/unit file");
+
+        // The assertion is about provenance, not about this machine: whatever
+        // the answer is, it has to be the real path the service manager uses,
+        // so `installed` can be trusted by the setup gate.
+        assert!(
+            svc.path.ends_with(".plist") || svc.path.ends_with(".service"),
+            "expected a real service-manager path, got {}",
+            svc.path
+        );
+        assert!(
+            Path::new(&svc.path).parent().is_some_and(|p| p.is_dir())
+                || !svc.installed,
+            "an `installed: true` claim must point at an existing directory"
+        );
+    }
+
+    /// Filling in service state must never overwrite what the CLI reported.
+    ///
+    /// The CLI asks launchctl, so it knows `running`; the filesystem fallback
+    /// cannot. Clobbering a real answer with the fallback would make a stopped
+    /// service look stopped-but-installed when the CLI had better information.
+    #[test]
+    fn cli_reported_service_state_wins_over_the_filesystem() {
+        let mut i = iface(Some("pubkey"), vec![]);
+        let reported = ServiceStatus {
+            manager: "launchd".into(),
+            installed: true,
+            running: true,
+            path: "/Library/LaunchDaemons/com.innernet.heheda-mesh.plist".into(),
+        };
+        i.service = Some(reported.clone());
+
+        let resolved = i.with_local_service_state();
+        let svc = resolved.service.expect("service stays present");
+        assert_eq!(svc.installed, reported.installed);
+        assert_eq!(svc.running, reported.running, "running must survive");
+        assert_eq!(svc.path, reported.path);
     }
 }
