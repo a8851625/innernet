@@ -125,7 +125,7 @@ loadScene();
 // test still passed. A test that copies the code it checks cannot catch a bug
 // in that code.
 function setupRule() {
-  const m = html.match(/const needsSetup = (.*?);\n/);
+  const m = html.match(/const needsSetup = ([^;\r\n]+);/);
   if (!m) throw new Error("needsSetup not found in index.html");
   // eslint-disable-next-line no-new-func
   return new Function("ifaces", `return ${m[1]};`);

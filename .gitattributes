@@ -1,0 +1,18 @@
+# Normalise line endings in the repository.
+#
+# Without this, a Windows checkout gets CRLF and the GUI tests -- which read
+# index.html and evaluate expressions out of it -- broke on the Windows runner
+# while passing on macOS and Linux. Text is stored LF and checked out per
+# platform; the tests are written to tolerate either.
+* text=auto
+
+# The tests parse these files, so pin the endings they see.
+*.html text eol=lf
+*.mjs  text eol=lf
+*.js   text eol=lf
+
+# Binaries: never touch.
+*.png binary
+*.icns binary
+*.ico binary
+*.dmg binary

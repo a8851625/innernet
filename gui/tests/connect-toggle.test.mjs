@@ -52,7 +52,7 @@ check(/configuration is kept/i.test(html), "Disconnect says the configuration is
 // the expression, so a change that keeps the text but inverts the meaning (or
 // reads the wrong field) fails here.
 {
-  const m = html.match(/const connected = (.*?);\n/);
+  const m = html.match(/const connected = ([^;\r\n]+);/);
   if (!m) throw new Error("`connected` not found in index.html");
   // eslint-disable-next-line no-new-func
   const isConnected = new Function("svc", `return ${m[1]};`);
