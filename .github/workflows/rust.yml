@@ -163,6 +163,7 @@ jobs:
           node gui/tests/role-gating.test.mjs
           node gui/tests/unit-variant-args.test.mjs
           node gui/tests/setup-screen.test.mjs
+          node gui/tests/connect-toggle.test.mjs
 
       - name: Build
         working-directory: gui/src-tauri

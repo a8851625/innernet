@@ -38,7 +38,6 @@ function loadScene() {
     const openJoinDialog = () => {};
     function renderState(o) { globalThis.__rendered = o; }
     ${extract("renderSetup")}
-    ${extract("serviceChecklistItem")}
     globalThis.__renderSetup = renderSetup;
   `;
   // eslint-disable-next-line no-new-func
@@ -72,55 +71,45 @@ loadScene();
 
 // --- the screen offers exactly one authorisation, not a prompt per click ----
 {
-  const o = render(snap({
-    denied: true,
-    service: { manager: "launchd", installed: true, running: false, path: "/x.plist" },
-  }));
+  const o = render(snap({ denied: true, service: null }));
   check(o.title === "One-time setup", "titled as a one-time setup");
-  check(o.body.includes("one authorisation"), "promises a single authorisation");
   check(
-    o.actions.filter((a) => a.kind === "primary").length === 1,
-    "exactly one primary action, not a menu of them"
+    o.body.includes("One authorisation"),
+    "promises a single authorisation"
   );
+  const primary = o.actions.filter((a) => a.kind === "primary");
+  check(primary.length === 1, "exactly one primary action");
   check(
-    o.actions.some((a) => a.label === "Grant access"),
-    "the primary action grants standing access"
-  );
-}
-
-// --- the boot service is surfaced, not buried in settings -----------------
-{
-  const stopped = render(snap({
-    denied: true,
-    service: { manager: "launchd", installed: true, running: false, path: "/x.plist" },
-  }));
-  const row = stopped.checklist.find((c) => c.label === "Runs at boot");
-  check(!!row, "boot service appears on the setup screen");
-  check(row.state === "todo", "a stopped service reads as outstanding");
-  check(row.note === "installed but stopped", "and says which case it is");
-
-  const missing = render(snap({ denied: true, service: { manager: "launchd", installed: false, running: false, path: "/x.plist" } }));
-  check(
-    missing.checklist.find((c) => c.label === "Runs at boot").note === "not installed",
-    "an absent service is distinguishable from a stopped one"
-  );
-
-  const running = render(snap({ denied: true, service: { manager: "launchd", installed: true, running: true, path: "/x.plist" } }));
-  check(
-    running.checklist.find((c) => c.label === "Runs at boot").state === "ok",
-    "a running service is not reported as outstanding"
+    primary[0].label === "Finish setup",
+    "the primary action finishes the install rather than asking for access alone"
   );
 }
 
-// --- an old CLI that reports no service state must not break the screen ---
+// --- setup is not a menu of install steps -----------------------------------
 {
   const o = render(snap({ denied: true, service: null }));
-  check(o.checklist.length > 0, "screen still renders without service data");
+  const labels = o.actions.map((a) => a.label.toLowerCase()).join(" ");
+  // The app used to leave `install-service` to the user, which meant "installed"
+  // and "usable" were different states. Finishing setup must cover it.
   check(
-    !o.checklist.some((c) => c.label === "Runs at boot"),
-    "no service row is invented when the CLI reports none"
+    !labels.includes("install service") && !labels.includes("start service"),
+    "does not ask the user to install the boot service by hand"
+  );
+  const checks = o.checklist.map((c) => c.label.toLowerCase()).join(" ");
+  check(
+    checks.includes("boot"),
+    "says the network will be kept connected at boot"
   );
 }
 
-console.log(`\nPASS=${pass} FAIL=${fail}`);
-process.exit(fail === 0 ? 0 : 1);
+// --- the checklist reflects that connecting is part of setup ----------------
+{
+  const o = render(snap({ denied: true, service: null }));
+  const boot = o.checklist.find((c) => c.label.toLowerCase().includes("boot"));
+  check(!!boot, "has a boot row");
+  check(boot.state === "todo", "boot row is pending until setup runs");
+}
+
+let failed = fail > 0;
+console.log(`PASS=${pass} FAIL=${fail}`);
+process.exit(failed ? 1 : 0);

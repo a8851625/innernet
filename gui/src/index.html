@@ -870,44 +870,39 @@ function renderNetwork(iface) {
     head.appendChild(syncBtn);
   }
 
-  if (iface.is_up) {
-    const down = document.createElement("button");
-    down.className = "subtle sm";
-    down.textContent = "Bring down";
-    down.title = "Stop the interface but keep its configuration";
-    down.onclick = () => confirmDialog({
-      title: "Bring down " + iface.name + "?",
-      sub: "This stops the WireGuard interface. The configuration stays on disk, so you can bring it back up later.",
-      confirmLabel: "Bring down",
-      onConfirm: () => run({ down: { interface: iface.name } }),
-    });
-    head.appendChild(down);
-  } else {
-    const up = document.createElement("button");
-    up.className = "primary sm";
-    // "Bring up" must leave the interface up. `innernet up` on its own runs
-    // once and exits, taking the tun device with it, so a fresh install looks
-    // connected for a moment and then silently goes down -- which is exactly
-    // what makes the button feel like it did nothing.
-    //
-    // When no boot service exists the honest action is to install one: it is
-    // the same authorisation the user was about to give, and it is the only
-    // version of "up" that persists.
-    const svc = iface.service;
-    const persistent = svc && svc.running;
-    up.textContent = persistent ? "Bring up" : "Start";
-    up.title = persistent
-      ? "Start the interface (it also runs at boot)"
-      : "Start the interface and keep it running at boot";
-    up.onclick = () => {
-      if (persistent) {
-        run({ up_interface: { interface: iface.name } });
-      } else {
-        run({ install_service: { interface: iface.name } });
-      }
-    };
-    head.appendChild(up);
-  }
+  // One switch: is this network connected or not.
+  //
+  // There is no "bring up" / "bring down" pair, because those are not things a
+  // user wants to think about. `innernet up` runs once and exits, taking the tun
+  // device with it; keeping a network connected is the boot service's job. So
+  // the switch is a view of that service: on means it is installed and running,
+  // off means it is stopped. One switch, one meaning, and the state it shows is
+  // the state the machine is actually in.
+  const svc = iface.service;
+  const connected = !!(svc && svc.running);
+  const toggle = document.createElement("button");
+  toggle.className = connected ? "subtle sm" : "primary sm";
+  toggle.textContent = connected ? "Disconnect" : "Connect";
+  toggle.title = connected
+    ? "Stop this network and stop it starting at boot"
+    : "Connect this network and keep it connected, including after a restart";
+  toggle.onclick = () => {
+    if (connected) {
+      confirmDialog({
+        title: "Disconnect " + iface.name + "?",
+        sub: "This stops the tunnel and stops it starting at boot. Your configuration is kept, so you can connect again at any time.",
+        confirmLabel: "Disconnect",
+        onConfirm: () => run({ uninstall_service: { interface: iface.name } }),
+      });
+    } else {
+      // Installing the service is what "connect" means: it starts the tunnel
+      // and keeps it up across restarts. There is no separate transient mode,
+      // because a tunnel that silently disappears is worse than one that was
+      // never started.
+      run({ install_service: { interface: iface.name } });
+    }
+  };
+  head.appendChild(toggle);
 
   const settings = document.createElement("button");
   settings.className = "subtle sm";
@@ -1180,53 +1175,6 @@ function openNetworkSettings(iface) {
     "</label>" +
     '<div style="font-size:11px;color:var(--text-faint)">Leave empty or press Auto to let WireGuard pick a random port.</div>' +
     '<div class="warn">These settings affect only this machine, not the network.</div>' +
-    // Boot service. Three distinct states need three distinct offers, so the
-    // block is built from what `show --json` reports rather than assuming.
-    (function () {
-      const svc = iface.service;
-      if (!svc) {
-        return (
-          '<div class="field" style="border-top:1px solid var(--line);padding-top:12px">' +
-            '<div style="font-size:12px;font-weight:510;margin-bottom:4px">Start at boot</div>' +
-            '<div style="font-size:11.5px;color:var(--text-dim);line-height:1.5">' +
-              "This build of the innernet CLI does not report boot-service state. " +
-              "Upgrade the CLI to manage it from here." +
-            "</div>" +
-          "</div>"
-        );
-      }
-      const state = svc.running
-        ? "Running. The interface is kept up across reboots."
-        : svc.installed
-        ? "Installed but not running. It will start on the next boot."
-        : "Not installed. The interface stays down after a reboot until you run it by hand.";
-      const dot = svc.running ? "var(--ok)" : svc.installed ? "var(--warn)" : "var(--text-faint)";
-      // Installed-but-stopped needs both offers: the unit exists so "Install"
-      // would be a lie, but a user who sees a stopped service wants to start it
-      // without removing and re-creating it.
-      const action = svc.running
-        ? '<button class="sm subtle" id="svcRemove">Remove</button>'
-        : svc.installed
-        ? '<button class="sm primary" id="svcStart">Start now</button>' +
-          '<button class="sm subtle" id="svcRemove" style="margin-left:6px">Remove</button>'
-        : '<button class="sm primary" id="svcInstall">Install</button>';
-      return (
-        '<div class="field" style="border-top:1px solid var(--line);padding-top:12px">' +
-          '<div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">' +
-            '<span style="width:6px;height:6px;border-radius:50%;background:' + dot + '"></span>' +
-            '<span style="font-size:12px;font-weight:510">Start at boot</span>' +
-            '<span style="font-size:11px;color:var(--text-faint)">' + esc(svc.manager) + "</span>" +
-          "</div>" +
-          '<div style="font-size:11.5px;color:var(--text-dim);line-height:1.5;margin-bottom:9px">' +
-            esc(state) +
-          "</div>" +
-          action +
-          '<div style="font-size:11px;color:var(--text-faint);margin-top:6px;word-break:break-all">' +
-            esc(svc.path) +
-          "</div>" +
-        "</div>"
-      );
-    })() +
     // Leaving the network is destructive, so it lives at the bottom of
     // Settings, behind a red button and a confirmation.
     '<div style="margin-top:6px;padding-top:12px;border-top:1px solid var(--line)">' +
@@ -1265,41 +1213,6 @@ function openNetworkSettings(iface) {
     unset.onclick = async () => {
       closeDialog();
       await run({ unset_listen_port: { interface: iface.name } });
-    };
-  }
-
-  const svcInstall = $("svcInstall");
-  if (svcInstall) {
-    svcInstall.onclick = async () => {
-      closeDialog();
-      await run({ install_service: { interface: iface.name } });
-    };
-  }
-
-  const svcStart = $("svcStart");
-  if (svcStart) {
-    svcStart.onclick = async () => {
-      closeDialog();
-      // Reinstalling is what makes launchd/systemd pick the unit up again; the
-      // CLI is idempotent, so this restarts a stopped service safely.
-      await run({ install_service: { interface: iface.name } });
-    };
-  }
-
-  const svcRemove = $("svcRemove");
-  if (svcRemove) {
-    svcRemove.onclick = () => {
-      closeDialog();
-      confirmDialog({
-        title: "Stop starting " + iface.name + " at boot?",
-        body:
-          "Removes the boot service. The network stays configured, and the interface " +
-          "keeps running until the next reboot.",
-        confirmLabel: "Remove",
-        onConfirm: async () => {
-          await run({ uninstall_service: { interface: iface.name } });
-        },
-      });
     };
   }
 
@@ -1744,20 +1657,19 @@ function renderSetup(snap) {
     kind: "setup",
     title: "One-time setup",
     body:
-      "Your network is configured, but this account cannot read it. " +
-      "innernet keeps its configuration and its WireGuard sockets readable by root only. " +
-      "Granting your account access takes one authorisation, and it applies to everything after this — " +
-      "reading the peer list, bringing the interface up, inviting peers.",
+      "This network is set up, but macOS keeps it readable by root only. " +
+      "One authorisation finishes the install: it connects the network, keeps it " +
+      "connected across restarts, and lets this app read it without asking again.",
     detail: snap && snap.config_dir ? "config dir: " + snap.config_dir : null,
     checklist: [
       { label: "Command-line tool", state: "ok", note: (snap && snap.binary) || "bundled" },
       { label: "Network configuration", state: "ok", note: "found" },
       { label: "Read access for your account", state: "todo", note: "not granted" },
-      serviceChecklistItem(snap),
+      { label: "Connect now and at boot", state: "todo", note: "set up with the step above" },
     ].filter(Boolean),
     actions: [
       {
-        label: "Grant access",
+        label: "Finish setup",
         kind: "primary",
         onClick: async () => {
           await runSetupAction("grant_access");
@@ -1773,33 +1685,6 @@ function renderSetup(snap) {
       { label: "Check again", onClick: load },
     ],
   });
-}
-
-/// The boot-service row of the setup checklist.
-///
-/// Bringing the interface up once is not the same as keeping it up: `up` exits
-/// and the tun device disappears with it, which is why a fresh install looks
-/// "connected" and then silently stops. The service is what makes it persist,
-/// so it belongs on the setup screen rather than buried in settings.
-function serviceChecklistItem(snap) {
-  const iface = snap && (snap.interfaces || [])[0];
-  if (!iface) return null;
-  const svc = iface.service;
-  if (!svc) {
-    return {
-      label: "Runs at boot",
-      state: "todo",
-      note: "this CLI does not report it",
-    };
-  }
-  if (svc.running) {
-    return { label: "Runs at boot", state: "ok", note: svc.manager };
-  }
-  return {
-    label: "Runs at boot",
-    state: "todo",
-    note: svc.installed ? "installed but stopped" : "not installed",
-  };
 }
 
 async function load() {

@@ -1147,12 +1147,67 @@ fn link_cli() -> ActionResult {
 #[tauri::command]
 fn grant_access() -> ActionResult {
     let res = grant_local_access();
-    // A successful grant makes the cached "already authorised" flag irrelevant:
-    // the unprivileged read works now, so state reads stop needing the prompt.
-    if res.ok {
-        let _ = STATE_READ_AUTHORISED.set(());
+    if !res.ok {
+        return res;
     }
-    res
+
+    // The authorisation the user just gave is the only one they should have to
+    // give. Finishing the job here -- rather than telling them to open a
+    // terminal and run install-service -- is what makes the app installable:
+    // an app that leaves a setup step on the user's plate has not been
+    // installed, it has been unpacked.
+    //
+    // Installing the service also starts the tunnel and keeps it up across
+    // restarts, which is what "connected" means; and because the service is
+    // root, it publishes the state snapshot the app reads. Without this step
+    // the app has permissions but no daemon, so it would still have nothing to
+    // show.
+    let mut notes = Vec::new();
+    if let Ok(binary) = cli_path() {
+        if let Some(iface) = first_interface_name(&binary) {
+            let installed =
+                run_privileged(&binary, &["install-service".to_string(), iface.clone()]);
+            if installed.ok {
+                notes.push(format!("service installed for {iface}"));
+            } else {
+                notes.push(format!(
+                    "could not install the service: {}",
+                    installed.stderr.trim()
+                ));
+            }
+            // Publish once immediately so the app has data to show before the
+            // daemon's first interval elapses.
+            let _ = run_privileged(&binary, &["export-state".to_string(), iface]);
+        }
+    }
+
+    let _ = STATE_READ_AUTHORISED.set(());
+    ActionResult {
+        ok: true,
+        needs_privileges: false,
+        needs_admin: false,
+        stdout: notes.join("\n"),
+        stderr: String::new(),
+        command: "grant access".to_string(),
+    }
+}
+
+/// Name of the first configured interface, for setup-time actions.
+///
+/// Read from `show --json` because that is the only listing that works before
+/// permissions exist: it falls back to the config files, which are the
+/// authoritative record of what is configured here.
+fn first_interface_name(binary: &str) -> Option<String> {
+    let out = Command::new(binary)
+        .args(["show", "--json"])
+        .output()
+        .ok()?;
+    let snapshot: Snapshot = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).ok()?;
+    snapshot
+        .interfaces
+        .first()
+        .map(|i| i.name.clone())
+        .filter(|n| !n.is_empty())
 }
 
 #[tauri::command]
