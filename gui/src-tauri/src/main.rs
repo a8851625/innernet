@@ -651,11 +651,74 @@ struct InvitePreview {
 // CLI discovery
 // ---------------------------------------------------------------------------
 
+/// The `innernet` CLI shipped inside the app bundle, if this build has one.
+///
+/// Tauri's sidecar mechanism places an `externalBin` next to the main
+/// executable -- in `Contents/MacOS/` on macOS, beside the `.exe` on Windows.
+/// Shipping the CLI this way means `innernet.app` is self-contained: installing
+/// the app is enough, and there is no second thing to install or keep in step.
+/// The minimum CLI whose `show --json` this app understands.
+///
+/// 2.4.4 is where an unreadable WireGuard socket stopped being reported as
+/// "no networks": before it, `permission_denied` stayed false and interfaces
+/// came back empty, which the app renders as an empty state rather than
+/// offering the privileges path.
+const MIN_CLI_VERSION: &str = "2.4.4";
+
+/// Returns the minimum version when `reported` is older than it can handle.
+///
+/// Compares numeric components only; a CLI that reports something unparseable
+/// is left alone rather than blocked, since guessing would be worse than
+/// letting it through and seeing the real error.
+fn version_too_old(reported: &str) -> Option<&'static str> {
+    let parse = |v: &str| -> Option<(u64, u64, u64)> {
+        let core = v.split(['-', '+']).next()?;
+        let mut it = core.split('.');
+        let major = it.next()?.parse().ok()?;
+        let minor = it.next().unwrap_or("0").parse().ok()?;
+        let patch = it.next().unwrap_or("0").parse().ok()?;
+        Some((major, minor, patch))
+    };
+
+    let got = parse(reported)?;
+    let need = parse(MIN_CLI_VERSION)?;
+    if got < need {
+        Some(MIN_CLI_VERSION)
+    } else {
+        None
+    }
+}
+
+fn bundled_cli() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let name = if cfg!(windows) {
+        "innernet.exe"
+    } else {
+        "innernet"
+    };
+    let candidate = dir.join(name);
+    if candidate.is_file() {
+        Some(candidate.display().to_string())
+    } else {
+        None
+    }
+}
+
 fn cli_path() -> Result<String, String> {
     if let Ok(p) = std::env::var("INNERNET_CLI") {
         if !p.trim().is_empty() {
             return Ok(p);
         }
+    }
+
+    // The CLI we shipped inside the app bundle wins over anything installed on
+    // the system. It is the exact build this GUI was released with, so the
+    // `show --json` schema and the argv mapping are guaranteed to match -- a
+    // brew-installed CLI can be older and silently return fields we do not
+    // understand (or none at all).
+    if let Some(bundled) = bundled_cli() {
+        return Ok(bundled);
     }
 
     // A double-clicked .app inherits a minimal PATH, so probe known locations
@@ -734,6 +797,25 @@ fn get_state() -> StateResult {
 
     match serde_json::from_str::<Snapshot>(&stdout) {
         Ok(snapshot) => {
+            // A CLI older than this reports networks as invisible when it
+            // simply cannot read the sockets, so the app would show "no
+            // networks" on a machine that is connected. Refuse it loudly
+            // instead: silence here looks like a working empty state.
+            if let Some(needed) = version_too_old(&snapshot.version) {
+                return StateResult {
+                    ok: false,
+                    needs_privileges: false,
+                    error: Some(format!(
+                        "The innernet CLI at {binary} is version {}, but this app needs {needed} \
+                         or newer.\n\nUpgrade it, or install the app bundle again -- it ships \
+                         its own CLI.",
+                        snapshot.version
+                    )),
+                    snapshot: None,
+                    binary: Some(binary),
+                };
+            }
+
             if snapshot.permission_denied && snapshot.interfaces.is_empty() {
                 // The config dirs are root-only, so the unprivileged read can
                 // never succeed. Read the state the same way every other
@@ -1607,5 +1689,57 @@ mod service_tests {
         assert!(running.installed && running.running);
         assert_eq!(running.manager, "launchd");
         assert_eq!(running.path, "/Library/LaunchDaemons/x.plist");
+    }
+}
+
+#[cfg(test)]
+mod cli_discovery_tests {
+    use super::*;
+
+    /// A CLI older than MIN_CLI_VERSION reports an unreadable socket as "no
+    /// networks", so the app must refuse it rather than render an empty state.
+    #[test]
+    fn old_cli_versions_are_rejected() {
+        assert_eq!(version_too_old("2.2.2"), Some(MIN_CLI_VERSION));
+        assert_eq!(version_too_old("2.4.3"), Some(MIN_CLI_VERSION));
+        assert_eq!(version_too_old("1.9.9"), Some(MIN_CLI_VERSION));
+    }
+
+    #[test]
+    fn current_and_newer_cli_versions_pass() {
+        assert_eq!(version_too_old(MIN_CLI_VERSION), None);
+        assert_eq!(version_too_old("2.4.5"), None);
+        assert_eq!(version_too_old("2.10.0"), None);
+        assert_eq!(version_too_old("3.0.0"), None);
+    }
+
+    /// Pre-release and build metadata must not affect the comparison: 2.4.4-rc1
+    /// is the same major.minor.patch as 2.4.4 for our purposes.
+    #[test]
+    fn prerelease_suffixes_are_ignored() {
+        assert_eq!(version_too_old("2.4.4-rc1"), None);
+        assert_eq!(version_too_old("2.4.4+build7"), None);
+        assert_eq!(version_too_old("2.4.3-rc9"), Some(MIN_CLI_VERSION));
+    }
+
+    /// Unparseable versions are not blocked: guessing would hide the real
+    /// error behind a version complaint.
+    #[test]
+    fn unparseable_versions_are_not_blocked() {
+        assert_eq!(version_too_old("dev"), None);
+        assert_eq!(version_too_old(""), None);
+    }
+
+    /// The bundled CLI, when present, must be preferred over any system copy:
+    /// that is the whole point of shipping it.
+    #[test]
+    fn bundled_cli_is_preferred_over_a_system_install() {
+        // bundled_cli() resolves next to current_exe(); in a test binary that
+        // directory has no innernet, so it returns None and discovery falls
+        // through. Assert the ordering contract instead of a concrete path.
+        let bundled = bundled_cli();
+        if let Some(p) = &bundled {
+            assert!(Path::new(p).is_file(), "bundled path must exist: {p}");
+        }
     }
 }

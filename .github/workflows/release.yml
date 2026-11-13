@@ -326,20 +326,80 @@ jobs:
           node gui/tests/role-gating.test.mjs
           node gui/tests/unit-variant-args.test.mjs
 
+      # Build the CLI first: the app bundle ships it, so installing the .dmg is
+      # enough and there is no separate `brew install` step to get wrong.
+      - name: Build the CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p innernet \
+            ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+          echo "CLI built"
+
+      # Bundle only -- publishing happens in a later step, because the CLI has
+      # to be injected into the .app before the .dmg is made from it.
       - name: Build bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: gui
-          args: ${{ matrix.args }}
-          # tauri-action publishes straight to the Release for tag builds.
-          # An empty tagName means "do not touch releases".
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('innernet {0}', github.ref_name) || '' }}
-          releaseBody: ""
-          releaseDraft: false
+          # macOS: build only the .app here. The .dmg is made after the CLI is
+          # injected, otherwise the published disk image would lack the CLI.
+          args: ${{ runner.os == 'macOS' && format('--bundles app {0}', matrix.args) || matrix.args }}
+          # An empty tagName means "do not touch releases"; the inject step
+          # below needs the bundle to exist first, so publishing is separate.
+          tagName: ""
+
+      - name: Inject the CLI into the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.rust_target }}"
+          cli="target/release/innernet"
+          if [ -n "$target" ]; then
+            cli="target/$target/release/innernet"
+          fi
+          [ -f "$cli.exe" ] && cli="$cli.exe"
+
+          case "${RUNNER_OS}" in
+            macOS)
+              app=$(find gui/src-tauri/target -name "innernet.app" -maxdepth 6 -type d | head -1)
+              [ -n "$app" ] || { echo "no .app found"; exit 1; }
+              sh gui/inject-cli.sh "$app" "$cli"
+              # The DMG must be rebuilt from the app we just modified.
+              version=$(grep -m1 '^version' gui/src-tauri/Cargo.toml | cut -d'"' -f2)
+              dmg="gui/src-tauri/target/release/bundle/dmg/innernet_${version}_aarch64.dmg"
+              mkdir -p "$(dirname "$dmg")"
+              # A bare .app on the volume leaves the user guessing; the usual
+              # /Applications symlink makes the drag-to-install gesture obvious.
+              stage=$(mktemp -d)
+              cp -R "$app" "$stage/"
+              ln -s /Applications "$stage/Applications"
+              hdiutil create -volname innernet -srcfolder "$stage" -ov -format UDZO "$dmg"
+              rm -rf "$stage"
+              echo "built $dmg"
+              ;;
+            Windows)
+              exe=$(find gui/src-tauri/target -name "innernet-gui.exe" -maxdepth 6 -type f | head -1)
+              [ -n "$exe" ] || { echo "no gui exe found"; exit 1; }
+              sh gui/inject-cli.sh "$exe" "$cli"
+              ;;
+          esac
+
+      - name: Publish the bundles
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ format('innernet {0}', github.ref_name) }}
+          draft: false
           prerelease: false
+          files: |
+            gui/src-tauri/target/**/*.dmg
+            gui/src-tauri/target/**/*.app.tar.gz
+            gui/src-tauri/target/**/*-setup.exe
+            gui/src-tauri/target/**/*.msi
 
       - name: Collect bundles
         shell: bash
