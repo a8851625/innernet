@@ -30,6 +30,18 @@ struct InterfaceSnapshot {
     peers: Vec<PeerSnapshot>,
     cidrs: Vec<CidrSnapshot>,
     endpoint_overrides: Vec<EndpointOverride>,
+    /// Present in `show --json` since 2.4.0. Optional so the app still talks to
+    /// an older CLI instead of failing to parse the whole snapshot.
+    #[serde(default)]
+    service: Option<ServiceStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ServiceStatus {
+    manager: String,
+    installed: bool,
+    running: bool,
+    path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +274,14 @@ enum Action {
     Uninstall {
         interface: String,
     },
+    /// Install the boot service that keeps the interface up.
+    InstallService {
+        interface: String,
+    },
+    /// Remove the boot service installed by `InstallService`.
+    UninstallService {
+        interface: String,
+    },
     /// Join a network from an invitation file.
     Install {
         invite_path: String,
@@ -376,6 +396,14 @@ impl Action {
                 a.push("uninstall".into());
                 a.push(validate_interface(interface)?);
                 a.push("--yes".into());
+            },
+            Action::InstallService { interface } => {
+                a.push("install-service".into());
+                a.push(validate_interface(interface)?);
+            },
+            Action::UninstallService { interface } => {
+                a.push("uninstall-service".into());
+                a.push(validate_interface(interface)?);
             },
             Action::Install {
                 invite_path,
@@ -1297,5 +1325,99 @@ mod tests {
         // The preview struct has no field that could carry the key.
         let json = serde_json::to_string(&prev).unwrap();
         assert!(!json.contains("SUPERSECRETKEY"));
+    }
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+
+    #[test]
+    fn service_actions_use_the_cli_subcommands() {
+        // The GUI must drive the CLI rather than writing unit files itself: the
+        // CLI is what knows the platform paths and the running binary.
+        assert_eq!(
+            Action::InstallService {
+                interface: "heheda-mesh".into()
+            }
+            .args()
+            .unwrap(),
+            vec!["install-service", "heheda-mesh"]
+        );
+        assert_eq!(
+            Action::UninstallService {
+                interface: "heheda-mesh".into()
+            }
+            .args()
+            .unwrap(),
+            vec!["uninstall-service", "heheda-mesh"]
+        );
+    }
+
+    #[test]
+    fn service_actions_validate_the_interface_name() {
+        // Same guard as every other action: a crafted interface name must not
+        // reach argv, or it becomes a way to run arbitrary commands as root
+        // once the authorisation prompt is accepted.
+        let bad = Action::InstallService {
+            interface: "foo; rm -rf /".into(),
+        };
+        assert!(bad.args().is_err());
+        let bad = Action::UninstallService {
+            interface: "$(whoami)".into(),
+        };
+        assert!(bad.args().is_err());
+    }
+
+    #[test]
+    fn service_status_is_optional_for_older_clis() {
+        // A CLI older than 2.4.0 has no `service` key. The whole snapshot must
+        // still parse, otherwise upgrading the app before the CLI would break
+        // the network list entirely.
+        let json = r#"{
+            "name": "heheda-mesh",
+            "network_name": "heheda-mesh",
+            "is_up": true,
+            "listen_port": 51820,
+            "address": "10.60.1.2",
+            "network_cidr_prefix": 16,
+            "public_key": null,
+            "me": null,
+            "peers": [],
+            "cidrs": [],
+            "endpoint_overrides": []
+        }"#;
+        let snap: InterfaceSnapshot = serde_json::from_str(json).expect("should parse");
+        assert!(snap.service.is_none());
+    }
+
+    #[test]
+    fn service_status_distinguishes_the_three_states() {
+        // The UI offers a different action per state, so the JSON must carry
+        // enough to tell them apart: not installed, installed but stopped, and
+        // running.
+        let parse = |installed: bool, running: bool| {
+            let json = format!(
+                r#"{{"name":"x","network_name":"x","is_up":false,"listen_port":null,
+                    "address":"10.0.0.1","network_cidr_prefix":16,"public_key":null,
+                    "me":null,"peers":[],"cidrs":[],"endpoint_overrides":[],
+                    "service":{{"manager":"launchd","installed":{installed},
+                    "running":{running},"path":"/Library/LaunchDaemons/x.plist"}}}}"#
+            );
+            serde_json::from_str::<InterfaceSnapshot>(&json)
+                .unwrap()
+                .service
+                .unwrap()
+        };
+
+        let absent = parse(false, false);
+        let stopped = parse(true, false);
+        let running = parse(true, true);
+
+        assert!(!absent.installed && !absent.running);
+        assert!(stopped.installed && !stopped.running);
+        assert!(running.installed && running.running);
+        assert_eq!(running.manager, "launchd");
+        assert_eq!(running.path, "/Library/LaunchDaemons/x.plist");
     }
 }

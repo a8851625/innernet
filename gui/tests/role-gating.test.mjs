@@ -54,7 +54,11 @@ for (const a of ["add_peer","disable_peer","enable_peer","rename_peer","add_cidr
   check("ADMIN_ACTIONS 含 " + a, ADMIN_ACTIONS.has(a), true);
 }
 for (const a of ["uninstall","down","up","fetch","set_listen_port","override_endpoint",
-                 "unset_listen_port","unset_endpoint","override_peer_endpoint","unset_peer_endpoint"]) {
+                 "unset_listen_port","unset_endpoint","override_peer_endpoint","unset_peer_endpoint",
+                 // A boot service is this machine's own business: a plain member
+                 // must be able to keep their interface up across reboots
+                 // without asking a network admin.
+                 "install_service","uninstall_service"]) {
   check("member 可执行 " + a, ADMIN_ACTIONS.has(a), false);
 }
 console.log("\nPASS=" + pass + " FAIL=" + fail);

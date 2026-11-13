@@ -255,6 +255,93 @@ fn uninstall_launchd(name: &str) -> Result<(), Error> {
 }
 
 // ---------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------
+
+/// What the OS says about the boot service for one interface.
+///
+/// A GUI needs to tell three states apart, because they call for different
+/// actions: nothing installed (offer to install), installed but not running
+/// (offer to start or reinstall), and running (offer to remove). Reporting only
+/// a boolean would collapse the middle case into one of the other two and make
+/// the UI offer the wrong thing.
+///
+/// This is deliberately readable without root. `show --json` runs as a normal
+/// user, so it can only stat the unit file and ask the supervisor; anything
+/// that would need root reports the conservative answer instead of failing.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ServiceStatus {
+    /// `"launchd"` or `"systemd"`.
+    pub manager: &'static str,
+    /// The unit/plist exists on disk.
+    pub installed: bool,
+    /// The supervisor reports it as running. Only meaningful when installed.
+    pub running: bool,
+    /// Unit file path, for troubleshooting.
+    pub path: String,
+}
+
+/// Report the boot service state for `interface`.
+#[cfg(target_os = "macos")]
+pub fn status(interface: &str) -> ServiceStatus {
+    let path = launchd_plist_path(interface);
+    let installed = path.exists();
+    let running = installed && launchd_is_running(&launchd_label(interface));
+    ServiceStatus {
+        manager: "launchd",
+        installed,
+        running,
+        path: path.display().to_string(),
+    }
+}
+
+/// Report the boot service state for `interface`.
+#[cfg(not(target_os = "macos"))]
+pub fn status(interface: &str) -> ServiceStatus {
+    let path = systemd_unit_path(interface);
+    let installed = path.exists();
+    let running = installed && systemd_is_running(interface);
+    ServiceStatus {
+        manager: "systemd",
+        installed,
+        running,
+        path: path.display().to_string(),
+    }
+}
+
+/// Ask launchd whether the service is loaded and running.
+///
+/// `launchctl print` exits non-zero when the service is not loaded, so a
+/// failure means "not running" rather than an error worth surfacing.
+#[cfg(target_os = "macos")]
+fn launchd_is_running(label: &str) -> bool {
+    let Ok(output) = Command::new("launchctl")
+        .args(["print", &format!("system/{label}")])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    // "state = running" appears for a loaded job; a loaded-but-stopped job says
+    // "state = not running" or "state = waiting".
+    String::from_utf8_lossy(&output.stdout).contains("state = running")
+}
+
+/// Ask systemd whether the unit is active.
+#[cfg(not(target_os = "macos"))]
+fn systemd_is_running(name: &str) -> bool {
+    let Ok(output) = Command::new("systemctl")
+        .args(["is-active", &format!("innernet@{name}.service")])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout).trim() == "active"
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -354,5 +441,53 @@ mod tests {
     fn interval_matches_the_documented_value() {
         assert_eq!(INTERVAL_SECS, 60);
         assert!(systemd_unit("wg0", "/x").contains("--interval 60"));
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn status_reports_the_platform_manager() {
+        let s = status("nonexistent-interface-for-test");
+        #[cfg(target_os = "macos")]
+        assert_eq!(s.manager, "launchd");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(s.manager, "systemd");
+
+        // A name nobody installed must not claim to be installed or running:
+        // that would make a GUI offer to remove something that does not exist.
+        assert!(!s.installed);
+        assert!(!s.running);
+    }
+
+    #[test]
+    fn status_paths_are_absolute_and_named_after_the_interface() {
+        let s = status("heheda-mesh");
+        assert!(
+            s.path.starts_with('/'),
+            "path should be absolute: {}",
+            s.path
+        );
+        assert!(
+            s.path.contains("heheda-mesh"),
+            "path should name the interface: {}",
+            s.path
+        );
+    }
+
+    #[test]
+    fn running_implies_installed() {
+        // The struct is built so `running` is only ever set when the unit file
+        // exists. Guard the invariant: a running service with no unit file is a
+        // state a GUI cannot act on.
+        for name in ["heheda-mesh", "nonexistent-interface-for-test"] {
+            let s = status(name);
+            assert!(
+                !s.running || s.installed,
+                "running without installed is inconsistent: {s:?}"
+            );
+        }
     }
 }

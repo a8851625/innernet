@@ -1091,6 +1091,53 @@ function openNetworkSettings(iface) {
     "</label>" +
     '<div style="font-size:11px;color:var(--text-faint)">Leave empty or press Auto to let WireGuard pick a random port.</div>' +
     '<div class="warn">These settings affect only this machine, not the network.</div>' +
+    // Boot service. Three distinct states need three distinct offers, so the
+    // block is built from what `show --json` reports rather than assuming.
+    (function () {
+      const svc = iface.service;
+      if (!svc) {
+        return (
+          '<div class="field" style="border-top:1px solid var(--line);padding-top:12px">' +
+            '<div style="font-size:12px;font-weight:510;margin-bottom:4px">Start at boot</div>' +
+            '<div style="font-size:11.5px;color:var(--text-dim);line-height:1.5">' +
+              "This build of the innernet CLI does not report boot-service state. " +
+              "Upgrade the CLI to manage it from here." +
+            "</div>" +
+          "</div>"
+        );
+      }
+      const state = svc.running
+        ? "Running. The interface is kept up across reboots."
+        : svc.installed
+        ? "Installed but not running. It will start on the next boot."
+        : "Not installed. The interface stays down after a reboot until you run it by hand.";
+      const dot = svc.running ? "var(--ok)" : svc.installed ? "var(--warn)" : "var(--text-faint)";
+      // Installed-but-stopped needs both offers: the unit exists so "Install"
+      // would be a lie, but a user who sees a stopped service wants to start it
+      // without removing and re-creating it.
+      const action = svc.running
+        ? '<button class="sm subtle" id="svcRemove">Remove</button>'
+        : svc.installed
+        ? '<button class="sm primary" id="svcStart">Start now</button>' +
+          '<button class="sm subtle" id="svcRemove" style="margin-left:6px">Remove</button>'
+        : '<button class="sm primary" id="svcInstall">Install</button>';
+      return (
+        '<div class="field" style="border-top:1px solid var(--line);padding-top:12px">' +
+          '<div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">' +
+            '<span style="width:6px;height:6px;border-radius:50%;background:' + dot + '"></span>' +
+            '<span style="font-size:12px;font-weight:510">Start at boot</span>' +
+            '<span style="font-size:11px;color:var(--text-faint)">' + esc(svc.manager) + "</span>" +
+          "</div>" +
+          '<div style="font-size:11.5px;color:var(--text-dim);line-height:1.5;margin-bottom:9px">' +
+            esc(state) +
+          "</div>" +
+          action +
+          '<div style="font-size:11px;color:var(--text-faint);margin-top:6px;word-break:break-all">' +
+            esc(svc.path) +
+          "</div>" +
+        "</div>"
+      );
+    })() +
     // Leaving the network is destructive, so it lives at the bottom of
     // Settings, behind a red button and a confirmation.
     '<div style="margin-top:6px;padding-top:12px;border-top:1px solid var(--line)">' +
@@ -1129,6 +1176,41 @@ function openNetworkSettings(iface) {
     unset.onclick = async () => {
       closeDialog();
       await run({ unset_listen_port: { interface: iface.name } });
+    };
+  }
+
+  const svcInstall = $("svcInstall");
+  if (svcInstall) {
+    svcInstall.onclick = async () => {
+      closeDialog();
+      await run({ install_service: { interface: iface.name } });
+    };
+  }
+
+  const svcStart = $("svcStart");
+  if (svcStart) {
+    svcStart.onclick = async () => {
+      closeDialog();
+      // Reinstalling is what makes launchd/systemd pick the unit up again; the
+      // CLI is idempotent, so this restarts a stopped service safely.
+      await run({ install_service: { interface: iface.name } });
+    };
+  }
+
+  const svcRemove = $("svcRemove");
+  if (svcRemove) {
+    svcRemove.onclick = () => {
+      closeDialog();
+      confirmDialog({
+        title: "Stop starting " + iface.name + " at boot?",
+        body:
+          "Removes the boot service. The network stays configured, and the interface " +
+          "keeps running until the next reboot.",
+        confirmLabel: "Remove",
+        onConfirm: async () => {
+          await run({ uninstall_service: { interface: iface.name } });
+        },
+      });
     };
   }
 

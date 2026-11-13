@@ -38,6 +38,9 @@ pub struct InterfaceSnapshot {
     pub cidrs: Vec<CidrSnapshot>,
     /// Peers whose endpoint was overridden locally, keyed by peer IP.
     pub endpoint_overrides: Vec<EndpointOverride>,
+    /// Whether a boot service keeps this interface up, so a GUI can offer the
+    /// right action instead of guessing.
+    pub service: crate::service::ServiceStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -161,6 +164,7 @@ pub fn interface_snapshot(
                 parent: c.parent,
             })
             .collect(),
+        service: crate::service::status(name),
         endpoint_overrides: overrides
             .iter()
             .map(|(ip, ep)| EndpointOverride {
@@ -213,6 +217,12 @@ mod tests {
                     parent: Some(1),
                 }],
                 endpoint_overrides: vec![],
+                service: crate::service::ServiceStatus {
+                    manager: "launchd",
+                    installed: false,
+                    running: false,
+                    path: "/Library/LaunchDaemons/com.innernet.test.plist".to_string(),
+                },
             }],
         };
 
