@@ -127,6 +127,12 @@ impl InterfaceSnapshot {
 ///
 /// Returns `None` where this cannot be determined, so callers can distinguish
 /// "not installed" from "unknown" rather than collapsing both to false.
+///
+/// Windows has no equivalent install marker to check here. The CLI registers a
+/// scheduled task there, and `show --json` always reports `service` on a CLI new
+/// enough to have it, so the fallback is not needed -- returning `None` is the
+/// honest answer and the caller leaves the field absent rather than inventing
+/// "not installed".
 fn local_service_status(interface: &str) -> Option<ServiceStatus> {
     #[cfg(target_os = "macos")]
     let (manager, path) = (
@@ -134,14 +140,21 @@ fn local_service_status(interface: &str) -> Option<ServiceStatus> {
         PathBuf::from("/Library/LaunchDaemons").join(format!("com.innernet.{interface}.plist")),
     );
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     let (manager, path) = (
         "systemd",
         PathBuf::from("/etc/systemd/system").join(format!("innernet@{interface}.service")),
     );
 
+    #[cfg(windows)]
+    {
+        let _ = interface;
+        return None;
+    }
+
     // A missing parent directory means there is nothing to look at, not that the
     // service is absent for a reason worth reporting.
+    #[cfg(not(windows))]
     path.parent()
         .filter(|p| p.is_dir())
         .map(|_| ServiceStatus {
@@ -2506,8 +2519,22 @@ mod live_state_tests {
     #[test]
     fn unknown_service_state_comes_from_the_filesystem_not_a_default() {
         let s = snapshot(vec![iface(Some("pubkey"), vec![])]).with_local_service_state();
-        let svc = s.interfaces[0]
-            .service
+        let svc = &s.interfaces[0].service;
+
+        // Windows has no service-install marker this code can read, so "unknown"
+        // must stay unknown there rather than becoming a false "not installed".
+        // Asserting a resolved path on every platform is what broke this test on
+        // the Windows runner.
+        #[cfg(windows)]
+        {
+            assert!(
+                svc.is_none(),
+                "Windows cannot resolve it from the filesystem, so it must not guess"
+            );
+            return;
+        }
+
+        let svc = svc
             .as_ref()
             .expect("service state must be resolved from the plist/unit file");
 
@@ -2520,8 +2547,7 @@ mod live_state_tests {
             svc.path
         );
         assert!(
-            Path::new(&svc.path).parent().is_some_and(|p| p.is_dir())
-                || !svc.installed,
+            Path::new(&svc.path).parent().is_some_and(|p| p.is_dir()) || !svc.installed,
             "an `installed: true` claim must point at an existing directory"
         );
     }
