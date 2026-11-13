@@ -1558,16 +1558,54 @@ function renderError(state) {
     kind: "err",
     title: needsPriv ? "Permission required" : "Could not read state",
     body: needsPriv
-      ? "innernet keeps its configuration in a root-owned directory. Grant access with the button below; you will be asked to authorise once."
+      ? "innernet keeps its configuration in a root-owned directory, so the app " +
+        "cannot read it as your normal user. Giving your account standing access " +
+        "takes one authorisation and then never asks again."
       : (state.error || "The innernet CLI returned something unexpected."),
     detail: state.error && needsPriv ? state.error : (state.binary ? "cli: " + state.binary : null),
     actions: needsPriv
       ? [
-          { label: "Authorise…", kind: "primary", onClick: () => run("up") },
-          { label: "Retry", onClick: load },
+          {
+            label: "Allow my account access",
+            kind: "primary",
+            onClick: () => grantAccess(),
+          },
+          {
+            label: "Just this once",
+            kind: "subtle",
+            onClick: () => readStateOnce(),
+          },
         ]
       : [{ label: "Retry", kind: "primary", onClick: load }],
   });
+}
+
+// One-time grant: afterwards the app reads state without any prompt at all.
+// This is what the CLI tells people to do by hand; doing it from the app saves
+// them the two sudo commands and, more importantly, makes it stick.
+async function grantAccess() {
+  if (!invoke) return;
+  setBusy(true);
+  try {
+    const res = await invoke("grant_access");
+    if (res && res.ok) {
+      toast("Access granted. Refreshing…", "ok");
+      await load();
+    } else {
+      const err = (res && res.stderr ? res.stderr : "").trim();
+      toast(err || "Could not grant access", "err");
+    }
+  } catch (e) {
+    toast(String(e && e.message ? e.message : e), "err");
+  } finally {
+    setBusy(false);
+  }
+}
+
+// Read the state through an authorisation prompt without changing any
+// permissions. Useful when someone would rather not alter their account.
+async function readStateOnce() {
+  await load();
 }
 
 function renderEmpty(snap) {

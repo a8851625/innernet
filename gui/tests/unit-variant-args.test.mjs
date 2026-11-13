@@ -38,5 +38,15 @@ check("map {fetch:{interface}} -> 原 map", build({ fetch: { interface: "x" } })
 // 真实前端不应再有 unit 变体的空 map 调用
 check("没有 run({up:{}}) 残留", /run\(\{\s*up:\s*\{\s*\}\s*\}\)/.test(html), false);
 
+// The privileges screen used to offer "Authorise…" that only ran `up`, which
+// changes nothing about read permission -- so the user authorised, watched a
+// fetch happen, and landed back on the same screen. Guard the fix: the primary
+// action must be the one that makes future reads work.
+const grantBlock = html.slice(html.indexOf("const needsPriv ="), html.indexOf("function renderEmpty"));
+check("权限界面主按钮是授予访问", /label: "Allow my account access"/.test(grantBlock), true);
+check("授予访问调用 grant_access", /grantAccess\(\)/.test(html) && /invoke\("grant_access"\)/.test(html), true);
+check("权限界面不再用 up 冒充授权", /onClick: \(\) => run\("up"\)/.test(grantBlock), false);
+
 console.log(`\nPASS=${pass} FAIL=${fail}`);
 process.exit(fail ? 1 : 0);
+

@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // State model — mirrors `innernet show --json`
@@ -734,6 +735,13 @@ fn get_state() -> StateResult {
     match serde_json::from_str::<Snapshot>(&stdout) {
         Ok(snapshot) => {
             if snapshot.permission_denied && snapshot.interfaces.is_empty() {
+                // The config dirs are root-only, so the unprivileged read can
+                // never succeed. Read the state the same way every other
+                // action runs -- through the authorisation prompt -- and cache
+                // the fact that the user agreed, so refreshes do not nag.
+                if let Some(privileged) = read_state_privileged(&binary) {
+                    return privileged;
+                }
                 StateResult {
                     ok: false,
                     needs_privileges: true,
@@ -860,6 +868,17 @@ fn preview_invite(path: String) -> InvitePreview {
 }
 
 #[tauri::command]
+fn grant_access() -> ActionResult {
+    let res = grant_local_access();
+    // A successful grant makes the cached "already authorised" flag irrelevant:
+    // the unprivileged read works now, so state reads stop needing the prompt.
+    if res.ok {
+        let _ = STATE_READ_AUTHORISED.set(());
+    }
+    res
+}
+
+#[tauri::command]
 fn run_action(action: Action) -> ActionResult {
     let argv = match action.args() {
         Ok(a) => a,
@@ -912,9 +931,177 @@ fn run_action(action: Action) -> ActionResult {
     res
 }
 
+/// Grant the current user standing access to the root-only innernet dirs.
+///
+/// The alternative is to prompt for authorisation on every launch, forever,
+/// because /etc/innernet and /var/lib/innernet are root-only. This runs the
+/// two commands `innernet` itself recommends instead: put the dirs in a group
+/// the user belongs to, and give that group read/write. After that the app can
+/// read state and even change local settings without any prompt at all.
+///
+/// The group is named after the user, so two people on one Mac do not end up
+/// sharing access. `dscl` creates it if missing, which is idempotent.
+#[cfg(target_os = "macos")]
+fn grant_local_access() -> ActionResult {
+    let user = match Command::new("id").arg("-un").output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => {
+            return ActionResult {
+                ok: false,
+                stdout: String::new(),
+                stderr: "could not determine the current user".to_string(),
+                needs_privileges: false,
+                needs_admin: false,
+                command: String::new(),
+            }
+        },
+    };
+
+    let group = format!("innernet-{user}");
+    let script = format!(
+        "dscl . -read /Groups/{group} >/dev/null 2>&1 || dscl . -create /Groups/{group}; \
+         dscl . -create /Groups/{group} RealName \"innernet access for {user}\"; \
+         dseditgroup -o edit -a {user} -t user {group} 2>/dev/null || true; \
+         chgrp -R {group} /etc/innernet /var/lib/innernet; \
+         chmod -R g+rwX /etc/innernet /var/lib/innernet; \
+         echo granted"
+    );
+
+    let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+    let applescript = format!(
+        "do shell script \"{escaped}\" with administrator privileges \
+         with prompt \"innernet will let your account read its network configuration without asking again\""
+    );
+
+    match Command::new("osascript")
+        .args(["-e", &applescript])
+        .output()
+    {
+        Ok(o) => ActionResult {
+            ok: o.status.success(),
+            stdout: String::from_utf8_lossy(&o.stdout).to_string(),
+            stderr: if o.status.success() {
+                String::new()
+            } else {
+                String::from_utf8_lossy(&o.stderr).to_string()
+            },
+            needs_privileges: false,
+            needs_admin: false,
+            command: format!("grant access to {group}"),
+        },
+        Err(e) => ActionResult {
+            ok: false,
+            stdout: String::new(),
+            stderr: format!("failed to request privileges: {e}"),
+            needs_privileges: false,
+            needs_admin: false,
+            command: String::new(),
+        },
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn grant_local_access() -> ActionResult {
+    ActionResult {
+        ok: false,
+        stdout: String::new(),
+        stderr: "this action is only needed on macOS".to_string(),
+        needs_privileges: false,
+        needs_admin: false,
+        command: String::new(),
+    }
+}
+
+/// Read `show --json` through the authorisation prompt.
+///
+/// Returns `None` when the user has not authorised yet and we should fall back
+/// to asking the UI to show the privileges screen -- rather than treating a
+/// cancelled prompt as a hard error.
+fn read_state_privileged(binary: &str) -> Option<StateResult> {
+    // Once the user has authorised, refreshes must not prompt again: go through
+    // the same prompt only when we know it will not be shown.
+    let already = STATE_READ_AUTHORISED.get().is_some();
+
+    let output =
+        run_privileged_capture(binary, &["show".to_string(), "--json".to_string()], already)?;
+    let parsed = serde_json::from_str::<Snapshot>(&output).ok()?;
+
+    if parsed.permission_denied && parsed.interfaces.is_empty() {
+        return None;
+    }
+
+    let _ = STATE_READ_AUTHORISED.set(());
+
+    Some(StateResult {
+        ok: true,
+        error: None,
+        needs_privileges: false,
+        snapshot: Some(parsed),
+        binary: Some(binary.to_string()),
+    })
+}
+
+/// Whether the user has already authorised one privileged state read.
+///
+/// `/etc/innernet` and `/var/lib/innernet` are root-only, so an unprivileged
+/// `show --json` always reports permission_denied. Reading the state therefore
+/// needs the same authorisation as changing it -- but prompting on every
+/// refresh would be unbearable. The first successful privileged read is
+/// remembered for the life of the process, so the user authorises once per
+/// launch rather than once per refresh.
+static STATE_READ_AUTHORISED: OnceLock<()> = OnceLock::new();
+
 // ---------------------------------------------------------------------------
 // Privileged execution
 // ---------------------------------------------------------------------------
+
+/// Run a command as root and return its stdout, or `None` if the user did not
+/// authorise. `quiet` skips the prompt: it is used for refreshes after the user
+/// has already agreed once, where a second prompt would be pure noise.
+#[cfg(target_os = "macos")]
+fn run_privileged_capture(binary: &str, args: &[String], quiet: bool) -> Option<String> {
+    // launchctl-style tools cannot re-use a previous authorisation, so after
+    // the first consent the only way to avoid a prompt is to check whether the
+    // unprivileged call happens to work now (e.g. the user joined the group).
+    if quiet {
+        let out = Command::new(binary).args(args).output().ok()?;
+        if out.status.success() {
+            return Some(String::from_utf8_lossy(&out.stdout).to_string());
+        }
+        // Fall through to the prompt: better a prompt than a dead UI.
+    }
+
+    let mut script = shell_quote(binary);
+    for a in args {
+        script.push(' ');
+        script.push_str(&shell_quote(a));
+    }
+    let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+    let applescript = format!(
+        "do shell script \"{escaped}\" with administrator privileges \
+         with prompt \"innernet needs permission to read the network state\""
+    );
+
+    let out = Command::new("osascript")
+        .args(["-e", &applescript])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Windows and Linux run as the same user that installed the interface, so no
+/// elevation is involved in reading state.
+#[cfg(not(target_os = "macos"))]
+fn run_privileged_capture(binary: &str, args: &[String], _quiet: bool) -> Option<String> {
+    let out = Command::new(binary).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
 
 #[cfg(target_os = "macos")]
 fn run_privileged(binary: &str, args: &[String]) -> ActionResult {
@@ -1002,7 +1189,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_state,
             preview_invite,
-            run_action
+            run_action,
+            grant_access
         ])
         .run(tauri::generate_context!())
         .expect("error while running innernet gui");
