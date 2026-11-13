@@ -328,7 +328,14 @@ jobs:
 
       # Build the CLI first: the app bundle ships it, so installing the .dmg is
       # enough and there is no separate `brew install` step to get wrong.
+      #
+      # Not on Windows. The innernet CLI does not compile there at all --
+      # wireguard-control is Unix-only (libc::IFNAMSIZ, std::os::unix) because
+      # the userspace backend talks to a Unix socket. The Windows GUI therefore
+      # remains a front-end that needs a CLI from elsewhere, and the version
+      # gate tells the user so instead of showing an empty list.
       - name: Build the CLI
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -352,6 +359,7 @@ jobs:
           tagName: ""
 
       - name: Inject the CLI into the bundle
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -364,7 +372,7 @@ jobs:
 
           case "${RUNNER_OS}" in
             macOS)
-              app=$(find gui/src-tauri/target -name "innernet.app" -maxdepth 6 -type d | head -1)
+              app=$(find gui/src-tauri/target -maxdepth 6 -name "innernet.app" -type d | head -1)
               [ -n "$app" ] || { echo "no .app found"; exit 1; }
               sh gui/inject-cli.sh "$app" "$cli"
               # The DMG must be rebuilt from the app we just modified.
@@ -379,11 +387,6 @@ jobs:
               hdiutil create -volname innernet -srcfolder "$stage" -ov -format UDZO "$dmg"
               rm -rf "$stage"
               echo "built $dmg"
-              ;;
-            Windows)
-              exe=$(find gui/src-tauri/target -name "innernet-gui.exe" -maxdepth 6 -type f | head -1)
-              [ -n "$exe" ] || { echo "no gui exe found"; exit 1; }
-              sh gui/inject-cli.sh "$exe" "$cli"
               ;;
           esac
 
