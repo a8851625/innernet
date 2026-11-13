@@ -325,6 +325,7 @@ jobs:
         run: |
           node gui/tests/role-gating.test.mjs
           node gui/tests/unit-variant-args.test.mjs
+          node gui/tests/setup-screen.test.mjs
 
       # Build the CLI first: the app bundle ships it, so installing the .dmg is
       # enough and there is no separate `brew install` step to get wrong.

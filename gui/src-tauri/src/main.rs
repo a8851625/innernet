@@ -376,6 +376,39 @@ enum Action {
 }
 
 impl Action {
+    /// Whether this action touches a privileged local resource.
+    ///
+    /// Only two operations genuinely need root on macOS: creating the tun
+    /// device (`up`/`down`) and installing the boot service. Everything else
+    /// -- reading state, inviting a peer, renaming or disabling one, adding a
+    /// CIDR, editing associations -- is either a file read or an HTTP call to
+    /// the coordinating server, authenticated by the WireGuard public key.
+    ///
+    /// Asking for an administrator password before an HTTP request is not a
+    /// safety measure, it is a usability defect: `do shell script ...
+    /// with administrator privileges` has no session reuse, so the prompt
+    /// appears every single time. The GUI therefore elevates only for the
+    /// actions below and runs the rest directly.
+    fn needs_root(&self) -> bool {
+        matches!(
+            self,
+            Action::Up
+                | Action::UpInterface { .. }
+                | Action::Down { .. }
+                | Action::Fetch { .. }
+                | Action::Install { .. }
+                | Action::Uninstall { .. }
+                | Action::SetListenPort { .. }
+                | Action::UnsetListenPort { .. }
+                | Action::OverrideEndpoint { .. }
+                | Action::UnsetEndpoint { .. }
+                | Action::OverridePeerEndpoint { .. }
+                | Action::UnsetPeerEndpoint { .. }
+                | Action::InstallService { .. }
+                | Action::UninstallService { .. }
+        )
+    }
+
     fn args(&self) -> Result<Vec<String>, String> {
         let mut a: Vec<String> = Vec::new();
 
@@ -626,6 +659,20 @@ struct ActionResult {
     needs_admin: bool,
     /// The exact argv that ran, for the activity log.
     command: String,
+}
+
+impl ActionResult {
+    /// A plain failure that needs no elevation and no admin rights.
+    fn failed(message: String) -> Self {
+        Self {
+            ok: false,
+            stdout: String::new(),
+            stderr: message,
+            needs_privileges: false,
+            needs_admin: false,
+            command: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -949,6 +996,70 @@ fn preview_invite(path: String) -> InvitePreview {
     }
 }
 
+/// Expose the bundled CLI on the user's PATH.
+///
+/// Shipping the CLI inside the .app makes the GUI self-contained, but it also
+/// hides the tool from the terminal, which is where people expect to find it:
+/// "installed the app" and "can run `innernet`" should not be different things.
+///
+/// A symlink from /usr/local/bin keeps one copy of the binary, so upgrading the
+/// app upgrades the command too. The directory may need root, which is a single
+/// authorisation on top of the one the setup screen already asks for.
+#[tauri::command]
+fn link_cli() -> ActionResult {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => return ActionResult::failed(format!("cannot locate the app: {e}")),
+    };
+    let dir = match exe.parent() {
+        Some(d) => d,
+        None => return ActionResult::failed("cannot locate the app directory".to_string()),
+    };
+    let bundled = dir.join("innernet");
+    if !bundled.is_file() {
+        return ActionResult::failed(format!(
+            "this build has no bundled CLI at {}",
+            bundled.display()
+        ));
+    }
+
+    // /usr/local/bin is the conventional place for locally-installed tools and
+    // is already on PATH for macOS users.
+    let target = std::path::Path::new("/usr/local/bin/innernet");
+    let link = format!("ln -sf {} {}", bundled.display(), target.display());
+
+    let script =
+        format!("set -e\nmkdir -p /usr/local/bin\n{link}\n/usr/local/bin/innernet --version");
+    let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+    let applescript = format!(
+        "do shell script \"{escaped}\" with administrator privileges \
+         with prompt \"innernet will link its command-line tool into /usr/local/bin\""
+    );
+
+    match Command::new("osascript")
+        .args(["-e", &applescript])
+        .output()
+    {
+        Ok(o) if o.status.success() => ActionResult {
+            ok: true,
+            stdout: String::from_utf8_lossy(&o.stdout).to_string(),
+            stderr: String::new(),
+            needs_privileges: false,
+            needs_admin: false,
+            command: link,
+        },
+        Ok(o) => {
+            let e = String::from_utf8_lossy(&o.stderr).to_string();
+            if e.contains("-128") || e.contains("User canceled") {
+                ActionResult::failed("cancelled".to_string())
+            } else {
+                ActionResult::failed(e)
+            }
+        },
+        Err(e) => ActionResult::failed(format!("failed to request privileges: {e}")),
+    }
+}
+
 #[tauri::command]
 fn grant_access() -> ActionResult {
     let res = grant_local_access();
@@ -962,6 +1073,8 @@ fn grant_access() -> ActionResult {
 
 #[tauri::command]
 fn run_action(action: Action) -> ActionResult {
+    let action_needs_root = action.needs_root();
+
     let argv = match action.args() {
         Ok(a) => a,
         Err(e) => {
@@ -999,7 +1112,11 @@ fn run_action(action: Action) -> ActionResult {
         argv.join(" ")
     );
 
-    let mut res = run_privileged(&binary, &argv);
+    let mut res = if action_needs_root {
+        run_privileged(&binary, &argv)
+    } else {
+        run_direct(&binary, &argv)
+    };
 
     // A 401 from the coordinating server means "this peer is not an admin".
     // That is not fixable with an authorisation prompt, so it gets its own
@@ -1040,13 +1157,24 @@ fn grant_local_access() -> ActionResult {
     };
 
     let group = format!("innernet-{user}");
+
+    // Three things have to hold for the app to work without prompting, and all
+    // three are checked by `set -e` rather than assumed:
+    //
+    //   1. the group exists *and has a GID* -- `dscl . -create /Groups/x`
+    //      alone leaves it without one, and `dseditgroup` then silently fails
+    //      to add the member, which is how an earlier version reported success
+    //      while granting nothing;
+    //   2. the config/data directories are group-readable;
+    //   3. the WireGuard sockets are too. Without this the peer list is empty
+    //      even when everything else is right, because the userspace backend
+    //      cannot connect to a 0700 root:daemon socket and silently filters
+    //      the interface out.
+    //
+    // `set -e` plus a final marker echo means a partial failure reports as a
+    // failure instead of a cheerful "granted".
     let script = format!(
-        "dscl . -read /Groups/{group} >/dev/null 2>&1 || dscl . -create /Groups/{group}; \
-         dscl . -create /Groups/{group} RealName \"innernet access for {user}\"; \
-         dseditgroup -o edit -a {user} -t user {group} 2>/dev/null || true; \
-         chgrp -R {group} /etc/innernet /var/lib/innernet; \
-         chmod -R g+rwX /etc/innernet /var/lib/innernet; \
-         echo granted"
+        "set -e\n         if ! dscl . -read /Groups/{group} >/dev/null 2>&1; then\n           gid=$(dscl . -list /Groups PrimaryGroupID | awk '{{print $2}}' | sort -n | tail -1)\n           dscl . -create /Groups/{group}\n           dscl . -create /Groups/{group} RealName \"innernet access for {user}\"\n           dscl . -create /Groups/{group} PrimaryGroupID $((gid + 1))\n         fi\n         dseditgroup -o edit -a {user} -t user {group}\n         chgrp -R {group} /etc/innernet /var/lib/innernet\n         chmod -R g+rwX /etc/innernet /var/lib/innernet\n         if [ -d /var/run/wireguard ]; then\n           chgrp -R {group} /var/run/wireguard\n           chmod -R g+rwX /var/run/wireguard\n         fi\n         echo GRANTED-{group}"
     );
 
     let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
@@ -1059,17 +1187,28 @@ fn grant_local_access() -> ActionResult {
         .args(["-e", &applescript])
         .output()
     {
-        Ok(o) => ActionResult {
-            ok: o.status.success(),
-            stdout: String::from_utf8_lossy(&o.stdout).to_string(),
-            stderr: if o.status.success() {
-                String::new()
-            } else {
-                String::from_utf8_lossy(&o.stderr).to_string()
-            },
-            needs_privileges: false,
-            needs_admin: false,
-            command: format!("grant access to {group}"),
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            // Trust the marker, not the exit status: `do shell script` reports
+            // success for a script that ran but achieved nothing.
+            let granted = stdout.contains(&format!("GRANTED-{group}"));
+            ActionResult {
+                ok: granted,
+                stderr: if granted {
+                    String::new()
+                } else {
+                    let e = String::from_utf8_lossy(&o.stderr).to_string();
+                    if e.trim().is_empty() {
+                        "granting access did not complete (no marker from the script)".to_string()
+                    } else {
+                        e
+                    }
+                },
+                stdout,
+                needs_privileges: false,
+                needs_admin: false,
+                command: format!("grant access to {group}"),
+            }
         },
         Err(e) => ActionResult {
             ok: false,
@@ -1185,6 +1324,35 @@ fn run_privileged_capture(binary: &str, args: &[String], _quiet: bool) -> Option
     Some(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Run a command as the current user.
+///
+/// Used for every action that only reads files or talks HTTP, so the app never
+/// shows an administrator prompt for work that does not require one.
+fn run_direct(binary: &str, args: &[String]) -> ActionResult {
+    match Command::new(binary).args(args).output() {
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            ActionResult {
+                ok: o.status.success(),
+                stdout: String::from_utf8_lossy(&o.stdout).to_string(),
+                needs_privileges: !o.status.success()
+                    && (stderr.contains("Permission denied") || stderr.contains("can't access")),
+                stderr,
+                needs_admin: false,
+                command: String::new(),
+            }
+        },
+        Err(e) => ActionResult {
+            ok: false,
+            stdout: String::new(),
+            stderr: format!("failed to run {binary}: {e}"),
+            needs_privileges: false,
+            needs_admin: false,
+            command: String::new(),
+        },
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn run_privileged(binary: &str, args: &[String]) -> ActionResult {
     // Use the native authorisation dialog instead of collecting a password in
@@ -1272,7 +1440,8 @@ fn main() {
             get_state,
             preview_invite,
             run_action,
-            grant_access
+            grant_access,
+            link_cli
         ])
         .run(tauri::generate_context!())
         .expect("error while running innernet gui");
@@ -1740,6 +1909,92 @@ mod cli_discovery_tests {
         let bundled = bundled_cli();
         if let Some(p) = &bundled {
             assert!(Path::new(p).is_file(), "bundled path must exist: {p}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod privilege_tests {
+    use super::*;
+
+    /// The whole point of needs_root(): an administrator prompt must appear
+    /// only for work that genuinely cannot be done as the user. Reading state
+    /// and every server-side operation are plain HTTP or file reads.
+    #[test]
+    fn server_side_operations_never_ask_for_a_password() {
+        let quiet = [
+            Action::AddPeer {
+                interface: "i".into(),
+                name: "n".into(),
+                cidr: Some("c".into()),
+                auto_ip: true,
+                ip: None,
+                admin: false,
+                save_config: "/tmp/x.toml".into(),
+                advertise_routes: vec![],
+            },
+            Action::DisablePeer {
+                interface: "i".into(),
+                name: "n".into(),
+            },
+            Action::EnablePeer {
+                interface: "i".into(),
+                name: "n".into(),
+            },
+            Action::RenamePeer {
+                interface: "i".into(),
+                name: "n".into(),
+                new_name: "m".into(),
+            },
+            Action::AddCidr {
+                interface: "i".into(),
+                name: "n".into(),
+                cidr: "10.0.0.0/24".into(),
+                parent: None,
+            },
+            Action::DeleteCidr {
+                interface: "i".into(),
+                name: "n".into(),
+            },
+            Action::AddAssociation {
+                interface: "i".into(),
+                cidr1: "a".into(),
+                cidr2: "b".into(),
+            },
+        ];
+
+        for action in quiet {
+            assert!(
+                !action.needs_root(),
+                "{action:?} talks HTTP to the server and must not prompt"
+            );
+        }
+    }
+
+    /// The two operations that really do need root: creating the tun device and
+    /// installing the boot service.
+    #[test]
+    fn device_and_service_operations_do_ask() {
+        let rooted = [
+            Action::UpInterface {
+                interface: "i".into(),
+            },
+            Action::Down {
+                interface: "i".into(),
+            },
+            Action::InstallService {
+                interface: "i".into(),
+            },
+            Action::UninstallService {
+                interface: "i".into(),
+            },
+        ];
+
+        for action in rooted {
+            assert!(
+                action.needs_root(),
+                "{action:?} touches a privileged local resource"
+            );
         }
     }
 }

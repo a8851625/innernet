@@ -236,7 +236,38 @@
     font-size: 12px; color: var(--text-dim);
     max-width: 430px; line-height: 1.55; margin-top: 2px;
   }
-  .state .actions { margin-top: 15px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .state .checklist {
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0;
+  text-align: left;
+  display: inline-block;
+  min-width: 320px;
+}
+.state .checklist li {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.state .checklist li:last-child { border-bottom: 0; }
+.state .checklist .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--faint);
+}
+.state .checklist li.ok .dot { background: var(--ok); }
+.state .checklist li.todo .dot { background: var(--warn); }
+.state .checklist .label { color: var(--text); }
+.state .checklist .note {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.state .actions { margin-top: 15px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
   .state pre {
     margin-top: 13px; text-align: left; width: 100%; max-width: 560px;
     background: #0e1116; border: 1px solid var(--line); border-radius: 8px;
@@ -654,6 +685,25 @@ function renderState(o) {
   wrap.className = "state" + (o.kind === "err" ? " err" : "");
   wrap.innerHTML = (o.kind === "err" ? ICON_CROSS : ICON_EMPTY) +
     "<h3>" + esc(o.title) + "</h3><p>" + esc(o.body) + "</p>";
+  if (o.checklist && o.checklist.length) {
+    const list = document.createElement("ul");
+    list.className = "checklist";
+    for (const item of o.checklist) {
+      const li = document.createElement("li");
+      li.className = item.state;
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = item.label;
+      const note = document.createElement("span");
+      note.className = "note";
+      note.textContent = item.note || "";
+      li.append(dot, label, note);
+      list.appendChild(li);
+    }
+    wrap.appendChild(list);
+  }
   if (o.detail) {
     const pre = document.createElement("pre");
     pre.textContent = o.detail;
@@ -821,8 +871,27 @@ function renderNetwork(iface) {
   } else {
     const up = document.createElement("button");
     up.className = "primary sm";
-    up.textContent = "Bring up";
-    up.onclick = () => run({ up_interface: { interface: iface.name } });
+    // "Bring up" must leave the interface up. `innernet up` on its own runs
+    // once and exits, taking the tun device with it, so a fresh install looks
+    // connected for a moment and then silently goes down -- which is exactly
+    // what makes the button feel like it did nothing.
+    //
+    // When no boot service exists the honest action is to install one: it is
+    // the same authorisation the user was about to give, and it is the only
+    // version of "up" that persists.
+    const svc = iface.service;
+    const persistent = svc && svc.running;
+    up.textContent = persistent ? "Bring up" : "Start";
+    up.title = persistent
+      ? "Start the interface (it also runs at boot)"
+      : "Start the interface and keep it running at boot";
+    up.onclick = () => {
+      if (persistent) {
+        run({ up_interface: { interface: iface.name } });
+      } else {
+        run({ install_service: { interface: iface.name } });
+      }
+    };
     head.appendChild(up);
   }
 
@@ -1608,6 +1677,30 @@ async function readStateOnce() {
   await load();
 }
 
+// Dispatch for the one-time setup screen. Kept separate from run() because
+// these are not CLI subcommands -- they are backend commands that fix the
+// local environment.
+async function runSetupAction(which) {
+  if (which === "grant_access") return grantAccess();
+  if (!invoke) return;
+  setBusy(true);
+  try {
+    const res = await invoke(which);
+    if (res && res.ok) {
+      const v = (res.stdout || "").trim().split("\n").pop();
+      toast(v ? "Linked: " + v : "Command linked into /usr/local/bin", "ok");
+      await load();
+    } else {
+      const err = (res && res.stderr ? res.stderr : "").trim();
+      toast(err || "Could not link the command", "err");
+    }
+  } catch (e) {
+    toast(String(e && e.message ? e.message : e), "err");
+  } finally {
+    setBusy(false);
+  }
+}
+
 function renderEmpty(snap) {
   setStatus("", "no networks");
   renderState({
@@ -1620,6 +1713,79 @@ function renderEmpty(snap) {
       { label: "Check again", onClick: load },
     ],
   });
+}
+
+/// First-run setup.
+///
+/// Reached when the CLI is present but the app still cannot see the network.
+/// That is almost always permissions: the config directories and the WireGuard
+/// sockets are root-only, so a normal account reads nothing and the app would
+/// otherwise show "No networks yet" on a machine that is in fact connected.
+///
+/// The whole point is to fix it in one authorisation instead of prompting for
+/// every subsequent click, so this is a one-off screen with one button.
+function renderSetup(snap) {
+  setStatus("warn", "setup needed");
+  renderState({
+    kind: "setup",
+    title: "One-time setup",
+    body:
+      "Your network is configured, but this account cannot read it. " +
+      "innernet keeps its configuration and its WireGuard sockets readable by root only. " +
+      "Granting your account access takes one authorisation, and it applies to everything after this — " +
+      "reading the peer list, bringing the interface up, inviting peers.",
+    detail: snap && snap.config_dir ? "config dir: " + snap.config_dir : null,
+    checklist: [
+      { label: "Command-line tool", state: "ok", note: (snap && snap.binary) || "bundled" },
+      { label: "Network configuration", state: "ok", note: "found" },
+      { label: "Read access for your account", state: "todo", note: "not granted" },
+      serviceChecklistItem(snap),
+    ].filter(Boolean),
+    actions: [
+      {
+        label: "Grant access",
+        kind: "primary",
+        onClick: async () => {
+          await runSetupAction("grant_access");
+        },
+      },
+      {
+        label: "Also add the `innernet` command",
+        kind: "subtle",
+        onClick: async () => {
+          await runSetupAction("link_cli");
+        },
+      },
+      { label: "Check again", onClick: load },
+    ],
+  });
+}
+
+/// The boot-service row of the setup checklist.
+///
+/// Bringing the interface up once is not the same as keeping it up: `up` exits
+/// and the tun device disappears with it, which is why a fresh install looks
+/// "connected" and then silently stops. The service is what makes it persist,
+/// so it belongs on the setup screen rather than buried in settings.
+function serviceChecklistItem(snap) {
+  const iface = snap && (snap.interfaces || [])[0];
+  if (!iface) return null;
+  const svc = iface.service;
+  if (!svc) {
+    return {
+      label: "Runs at boot",
+      state: "todo",
+      note: "this CLI does not report it",
+    };
+  }
+  if (svc.running) {
+    return { label: "Runs at boot", state: "ok", note: svc.manager };
+  }
+  return {
+    label: "Runs at boot",
+    state: "todo",
+    note: svc.installed ? "installed but stopped" : "not installed",
+  };
 }
 
 async function load() {
@@ -1651,7 +1817,15 @@ async function load() {
 
       if (!ifaces.length) {
         setRoleChip(null);
-        renderEmpty(snapshot);
+        // An empty list is ambiguous on macOS. If the CLI can see a configured
+        // interface but the socket is unreadable, this is a permissions
+        // problem, not "you have not joined anything" -- and telling the user
+        // the latter would be a lie that sends them looking for an invitation.
+        if (snapshot && snapshot.permission_denied) {
+          renderSetup({ ...snapshot, binary: state.binary });
+        } else {
+          renderEmpty(snapshot);
+        }
       } else {
         // With several networks the chip reflects the strictest role, so the
         // user never assumes admin rights they lack on some interface.
