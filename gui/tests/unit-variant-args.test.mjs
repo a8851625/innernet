@@ -1,6 +1,13 @@
 // 提取真实的 run() 归一化逻辑验证：unit 变体必须发字符串，带字段的必须发 map
 import fs from "fs";
-const html = fs.readFileSync("src/index.html", "utf8");
+import path from "path";
+import { fileURLToPath } from "url";
+
+// Resolve against this file rather than the working directory: the workflows
+// run these tests from the repository root, while running them by hand from
+// gui/ is just as reasonable.
+const here = path.dirname(fileURLToPath(import.meta.url));
+const html = fs.readFileSync(path.join(here, "..", "src", "index.html"), "utf8");
 
 const start = html.indexOf("async function run(action");
 const body = html.slice(start, start + 3000);
