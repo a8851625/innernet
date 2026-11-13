@@ -849,12 +849,26 @@ function renderNetwork(iface) {
     (iface.listen_port ? '<span class="chip mono">:' + esc(iface.listen_port) + "</span>" : "") +
     '<div class="grow"></div>';
 
-  const syncBtn = document.createElement("button");
-  syncBtn.className = "subtle sm";
-  syncBtn.textContent = "Sync";
-  syncBtn.title = "Fetch the latest peer list and CIDR config";
-  syncBtn.onclick = () => run({ fetch: { interface: iface.name } });
-  head.appendChild(syncBtn);
+  // Sync duplicates work the daemon already does.
+  //
+  // `innernet fetch` writes the state file and updates the WireGuard device, so
+  // it needs root, which on macOS means a password prompt every time. But when
+  // the boot service is running it already fetches on an interval -- a manual
+  // Sync is the same call, just with a prompt attached. Offering it anyway
+  // teaches the user that this app asks for a password constantly.
+  //
+  // So the button is only shown when nothing is fetching automatically.
+  const autoFetching = iface.service && iface.service.running;
+  if (!autoFetching) {
+    const syncBtn = document.createElement("button");
+    syncBtn.className = "subtle sm";
+    syncBtn.textContent = "Sync now";
+    syncBtn.title = iface.service && iface.service.installed
+      ? "The boot service is stopped, so nothing is refreshing the peer list"
+      : "Fetch the latest peer list and CIDR config";
+    syncBtn.onclick = () => run({ fetch: { interface: iface.name } });
+    head.appendChild(syncBtn);
+  }
 
   if (iface.is_up) {
     const down = document.createElement("button");

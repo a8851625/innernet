@@ -18,6 +18,18 @@ struct Snapshot {
     interfaces: Vec<InterfaceSnapshot>,
 }
 
+impl Snapshot {
+    /// Whether the interfaces carry data read from the WireGuard device.
+    ///
+    /// A snapshot built without device access still lists the configured
+    /// networks, but the device itself is absent -- which on innernet means no
+    /// public key. That is the reliable marker: peers can legitimately be zero
+    /// on a fresh network, but a device always has a public key.
+    fn has_live_state(&self) -> bool {
+        self.interfaces.is_empty() || self.interfaces.iter().any(|i| i.public_key.is_some())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InterfaceSnapshot {
     name: String,
@@ -863,7 +875,17 @@ fn get_state() -> StateResult {
                 };
             }
 
-            if snapshot.permission_denied && snapshot.interfaces.is_empty() {
+            // Escalate when this account cannot see the live device, which is
+            // not the same as "there are no networks".
+            //
+            // Two distinct failures hide behind an empty-looking UI:
+            //   * the config files are unreadable, so interfaces is empty;
+            //   * the config is readable but the WireGuard socket is not, so
+            //     each interface arrives without its device -- no public key,
+            //     no peers, no stats, is_up false.
+            // Checking only the first left the second stuck on a blank card
+            // that never offered to fix itself.
+            if snapshot.permission_denied || !snapshot.has_live_state() {
                 // The config dirs are root-only, so the unprivileged read can
                 // never succeed. Read the state the same way every other
                 // action runs -- through the authorisation prompt -- and cache
@@ -1247,7 +1269,10 @@ fn read_state_privileged(binary: &str) -> Option<StateResult> {
         run_privileged_capture(binary, &["show".to_string(), "--json".to_string()], already)?;
     let parsed = serde_json::from_str::<Snapshot>(&output).ok()?;
 
-    if parsed.permission_denied && parsed.interfaces.is_empty() {
+    // If even a privileged read still cannot see the device, prompting again
+    // would loop forever. Hand the (empty) snapshot back and let the caller
+    // surface the real error.
+    if parsed.permission_denied || !parsed.has_live_state() {
         return None;
     }
 
@@ -1996,5 +2021,93 @@ mod privilege_tests {
                 "{action:?} touches a privileged local resource"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod live_state_tests {
+    use super::*;
+
+    fn peer(name: &str) -> PeerSnapshot {
+        PeerSnapshot {
+            name: name.into(),
+            ip: "10.60.1.1".into(),
+            public_key: "abc".into(),
+            cidr_id: 1,
+            is_admin: false,
+            is_disabled: false,
+            is_you: false,
+            is_connected: true,
+            endpoint: None,
+            endpoint_overridden: false,
+            last_handshake_secs_ago: Some(5),
+            rx_bytes: 1,
+            tx_bytes: 1,
+            allowed_subnets: vec![],
+        }
+    }
+
+    fn iface(public_key: Option<&str>, peers: Vec<PeerSnapshot>) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: "heheda-mesh".into(),
+            network_name: "heheda-mesh".into(),
+            is_up: public_key.is_some(),
+            listen_port: None,
+            address: "10.60.1.2".into(),
+            network_cidr_prefix: 16,
+            public_key: public_key.map(|s| s.to_string()),
+            me: None,
+            peers,
+            cidrs: vec![],
+            endpoint_overrides: vec![],
+            service: None,
+        }
+    }
+
+    fn snapshot(interfaces: Vec<InterfaceSnapshot>) -> Snapshot {
+        Snapshot {
+            version: "2.5.1".into(),
+            config_dir: "/etc/innernet".into(),
+            permission_denied: false,
+            interfaces,
+        }
+    }
+
+    /// The case that produced a permanently blank card: the config was
+    /// readable so permission_denied stayed false, but the socket was not, so
+    /// the interface arrived with no public key and no peers. The old check
+    /// only looked at permission_denied && interfaces.is_empty(), which was
+    /// false, so the app never escalated and never showed anything.
+    #[test]
+    fn interface_without_a_device_is_not_live_state() {
+        let s = snapshot(vec![iface(None, vec![])]);
+        assert!(!s.permission_denied, "config was readable");
+        assert!(!s.interfaces.is_empty(), "an interface was listed");
+        assert!(
+            !s.has_live_state(),
+            "but nothing live was read, so the app must escalate"
+        );
+    }
+
+    /// A healthy snapshot must not trigger a pointless password prompt.
+    #[test]
+    fn interface_with_a_device_and_peers_is_live_state() {
+        let s = snapshot(vec![iface(Some("pubkey"), vec![peer("mac-office")])]);
+        assert!(s.has_live_state());
+    }
+
+    /// A machine with nothing configured is genuinely empty, not unreadable.
+    #[test]
+    fn no_interfaces_at_all_is_not_an_escalation() {
+        let s = snapshot(vec![]);
+        assert!(s.has_live_state());
+    }
+
+    /// A device with zero peers is a real state (a fresh network), not a
+    /// permission problem -- the public key proves the socket was read.
+    #[test]
+    fn device_with_no_peers_still_counts_as_live() {
+        let s = snapshot(vec![iface(Some("pubkey"), vec![])]);
+        assert!(s.has_live_state());
     }
 }

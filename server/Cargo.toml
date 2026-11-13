@@ -15,7 +15,7 @@ name = "innernet-server"
 publish = true
 readme = "../README.md"
 repository = "https://github.com/tonarino/innernet"
-version = "2.5.1"
+version = "2.5.2"
 
 [lib]
 path = "src/lib.rs"
@@ -42,8 +42,8 @@ hyper = { version = "0.14", default-features = false, features = [
   "stream",
 ] }
 indoc = "2.0.1"
-innernet-publicip = { version = "2.5.1", path = "../publicip" }
-innernet-shared = { version = "2.5.1", path = "../shared" }
+innernet-publicip = { version = "2.5.2", path = "../publicip" }
+innernet-shared = { version = "2.5.2", path = "../shared" }
 ipnet = { version = "2.4", features = ["serde"] }
 libc = "0.2"
 libsqlite3-sys = "0.26"
