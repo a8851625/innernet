@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "innernet"
-version = "2.6.5"
+version = "2.6.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "innernet-client-core"
-version = "2.6.5"
+version = "2.6.6"
 dependencies = [
  "anyhow",
  "colored",
@@ -762,11 +762,11 @@ dependencies = [
 
 [[package]]
 name = "innernet-publicip"
-version = "2.6.5"
+version = "2.6.6"
 
 [[package]]
 name = "innernet-server"
-version = "2.6.5"
+version = "2.6.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "innernet-shared"
-version = "2.6.5"
+version = "2.6.6"
 dependencies = [
  "anyhow",
  "atty",

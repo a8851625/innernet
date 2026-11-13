@@ -1432,23 +1432,66 @@ fn grant_access() -> ActionResult {
     // root, it publishes the state snapshot the app reads. Without this step
     // the app has permissions but no daemon, so it would still have nothing to
     // show.
+    // The step that actually decides whether setup is done is installing the
+    // service. Reporting success without it is what produced an endless setup
+    // loop: `grant_access` returned ok, the UI refreshed, the service was still
+    // absent, `needsSetup` was true again, and the screen came straight back --
+    // asking for the same authorisation, having silently discarded the failure.
+    //
+    // So the outcome is tracked rather than assumed, and a failure is returned
+    // as a failure with the CLI's own message. A user who is asked twice for
+    // their password deserves to be told why.
     let mut notes = Vec::new();
-    if let Ok(binary) = cli_path() {
-        if let Some(iface) = first_interface_name(&binary) {
-            let installed =
-                run_privileged(&binary, &["install-service".to_string(), iface.clone()]);
-            if installed.ok {
-                notes.push(format!("service installed for {iface}"));
-            } else {
-                notes.push(format!(
-                    "could not install the service: {}",
-                    installed.stderr.trim()
-                ));
-            }
-            // Publish once immediately so the app has data to show before the
-            // daemon's first interval elapses.
-            let _ = run_privileged(&binary, &["export-state".to_string(), iface]);
-        }
+    let mut failure: Option<String> = None;
+
+    match cli_path() {
+        Ok(binary) => match first_interface_name(&binary) {
+            Some(iface) => {
+                let installed = run_privileged(
+                    &binary,
+                    &["install-service".to_string(), iface.clone()],
+                );
+                if installed.ok {
+                    notes.push(format!("service installed for {iface}"));
+                } else {
+                    // `cancelled` is a deliberate choice by the user, not a bug
+                    // to explain; anything else needs its text shown.
+                    let detail = installed.stderr.trim().to_string();
+                    failure = Some(if detail.is_empty() || detail == "cancelled" {
+                        "installing the boot service did not complete".to_string()
+                    } else {
+                        format!("could not install the service: {detail}")
+                    });
+                }
+
+                // Publish once immediately so the app has data to show before
+                // the daemon's first interval elapses. Best effort: the service
+                // start already exports within one interval.
+                if installed.ok {
+                    let _ = run_privileged(&binary, &["export-state".to_string(), iface]);
+                }
+            },
+            None => {
+                failure = Some(
+                    "no configured network was found, so there is nothing to install".to_string(),
+                );
+            },
+        },
+        Err(e) => failure = Some(e),
+    }
+
+    if let Some(message) = failure {
+        // Deliberately not marking the read as authorised: setup did not
+        // finish, so the next refresh must be allowed to try again rather than
+        // believe it already succeeded.
+        return ActionResult {
+            ok: false,
+            needs_privileges: false,
+            needs_admin: false,
+            stdout: notes.join("\n"),
+            stderr: message,
+            command: "grant access".to_string(),
+        };
     }
 
     let _ = STATE_READ_AUTHORISED.set(());
@@ -2646,14 +2689,21 @@ mod live_state_tests {
         );
     }
 
-    /// Filling in service state must never overwrite what the CLI reported.
+    /// Live service state must replace whatever the snapshot claimed.
     ///
-    /// The CLI asks launchctl, so it knows `running`; the filesystem fallback
-    /// cannot. Clobbering a real answer with the fallback would make a stopped
-    /// service look stopped-but-installed when the CLI had better information.
+    /// The snapshot is written by the daemon, so a stale one keeps asserting
+    /// `installed: true, running: true` after the service is gone. That claim
+    /// must not survive a read that can ask the service manager directly.
+    ///
+    /// Uses an interface name no machine can have installed, so the answer is
+    /// the same everywhere. The earlier version used "heheda-mesh" and asserted
+    /// no unit existed -- true on a CI runner, false on a developer machine that
+    /// had actually run setup, which made the test fail as a side effect of the
+    /// fix working.
     #[test]
     fn live_service_state_wins_over_the_snapshot() {
         let mut i = iface(Some("pubkey"), vec![]);
+        i.name = "no-such-interface-for-this-test".into();
         // What a snapshot written before Disconnect still claims.
         let stale = ServiceStatus {
             manager: "launchd".into(),
@@ -2665,10 +2715,10 @@ mod live_state_tests {
 
         let resolved = i.with_local_service_state();
 
-        // `heheda-mesh` has no launchd unit on any machine running these tests,
-        // so the service manager must report it as not running. Asserting the
-        // snapshot value "survives" is exactly the bug: it kept Disconnect
-        // looking like a no-op.
+        // No unit can exist for that name, so the service manager must report it
+        // as neither installed nor running. Asserting the snapshot value
+        // "survives" is exactly the bug: it kept Disconnect looking like a
+        // no-op.
         #[cfg(not(windows))]
         {
             let svc = resolved.service.expect("service state is resolved locally");
@@ -2738,5 +2788,50 @@ mod live_state_tests {
         // treated as ancient by default.
         s.generated_at = 0;
         assert!(!s.looks_abandoned(), "unknown age is not the same as old");
+    }
+
+    /// Setup must fail loudly when the service is not installed.
+    ///
+    /// `grant_access` used to build a note about the failure and then return
+    /// `ok: true` regardless. The UI refreshed, found `installed: false`,
+    /// decided setup was still needed, and put the same screen back -- so the
+    /// user was asked for their password over and over with no indication that
+    /// anything had gone wrong. The outcome now has to reach the caller.
+    #[test]
+    fn grant_access_reports_install_failure_instead_of_claiming_success() {
+        let src = include_str!("main.rs");
+        let start = src
+            .find("fn grant_access()")
+            .expect("grant_access must exist");
+        let end = src[start..]
+            .find("\n/// Name of the first configured interface")
+            .map(|i| start + i)
+            .expect("grant_access is followed by first_interface_name");
+        let body = &src[start..end];
+
+        assert!(
+            body.contains("failure = Some("),
+            "grant_access must record a failure rather than only noting it"
+        );
+        assert!(
+            body.contains("ok: false"),
+            "grant_access must return ok: false when setup did not finish"
+        );
+        // The success path must still exist, or setup could never complete.
+        assert!(
+            body.contains("ok: true"),
+            "grant_access must still report success when the service installs"
+        );
+        // Marking the read authorised on failure would make the next refresh
+        // trust a setup that never happened.
+        let failure_branch = body
+            .find("if let Some(message) = failure")
+            .expect("the failure branch must exist");
+        let after = &body[failure_branch..];
+        let first_return = after.find("return ActionResult").unwrap_or(after.len());
+        assert!(
+            !after[..first_return].contains("STATE_READ_AUTHORISED.set"),
+            "a failed setup must not be recorded as authorised"
+        );
     }
 }
