@@ -26,7 +26,16 @@ impl Snapshot {
     /// public key. That is the reliable marker: peers can legitimately be zero
     /// on a fresh network, but a device always has a public key.
     fn has_live_state(&self) -> bool {
-        self.interfaces.is_empty() || self.interfaces.iter().any(|i| i.public_key.is_some())
+        // "Live state" means the live device was actually read. An interface
+        // without a public key was never read -- that is the shape a
+        // permission-denied read produces, and treating it as live is what let
+        // the app render an empty card and stop trying to fix itself.
+        //
+        // No interfaces at all is genuinely ambiguous (nothing configured vs.
+        // nothing readable), so the caller's permission_denied decides it. This
+        // method answers the narrower question it is named after: did we see a
+        // device?
+        self.interfaces.iter().any(|i| i.public_key.is_some())
     }
 }
 
@@ -823,6 +832,46 @@ fn cli_path() -> Result<String, String> {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// Read the snapshot the boot daemon publishes, if there is one.
+///
+/// This is the path that matters. The daemon runs as root and already fetches
+/// on an interval, so it can see the live device; it writes that view to a
+/// world-readable file. Reading it costs no privileges and prompts for nothing,
+/// which is what makes the app usable -- the alternative was asking for an
+/// administrator password on every refresh, because the WireGuard socket it
+/// would otherwise need is root-only and gets recreated that way on every start.
+///
+/// Returns None when the daemon has never run (nothing published yet) or the
+/// file is from a CLI too old to have written one, in which case the caller
+/// falls back to reading directly.
+fn read_exported_state() -> Option<(Snapshot, String)> {
+    // Preferred location first: a fixed path the app can find without knowing
+    // where the CLI was configured to keep its data.
+    let candidates = [
+        "/var/run/innernet/state.json",
+        "/etc/innernet/state.json",
+        "/var/lib/innernet/state.json",
+    ];
+    for path in candidates {
+        let Ok(body) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(snapshot) = serde_json::from_str::<Snapshot>(&body) else {
+            continue;
+        };
+        // An exported snapshot is by definition a privileged read, so it must
+        // not claim otherwise. If it does, it was written by something that
+        // could not see the device either -- not worth trusting over a live
+        // read.
+        if snapshot.permission_denied || !snapshot.has_live_state() {
+            continue;
+        }
+        let version = snapshot.version.clone();
+        return Some((snapshot, version));
+    }
+    None
+}
+
 #[tauri::command]
 fn get_state() -> StateResult {
     let binary = match cli_path() {
@@ -837,6 +886,19 @@ fn get_state() -> StateResult {
             }
         },
     };
+
+    // The daemon's published snapshot is authoritative and free to read.
+    if let Some((snapshot, version)) = read_exported_state() {
+        if version_too_old(&version).is_none() {
+            return StateResult {
+                ok: true,
+                error: None,
+                needs_privileges: false,
+                snapshot: Some(snapshot),
+                binary: Some(binary),
+            };
+        }
+    }
 
     let output = match Command::new(&binary).args(["show", "--json"]).output() {
         Ok(o) => o,
@@ -2037,6 +2099,72 @@ mod privilege_tests {
 }
 
 #[cfg(test)]
+mod exported_state_tests {
+    use super::*;
+
+    fn snapshot_with_device() -> Snapshot {
+        serde_json::from_str(
+            r#"{
+                "version": "2.5.3",
+                "config_dir": "/etc/innernet",
+                "permission_denied": false,
+                "interfaces": [{
+                    "name": "heheda-mesh",
+                    "network_name": "heheda-mesh",
+                    "is_up": true,
+                    "listen_port": 51820,
+                    "address": "10.60.1.2",
+                    "network_cidr_prefix": 16,
+                    "public_key": "abc=",
+                    "me": null,
+                    "peers": [],
+                    "cidrs": [],
+                    "endpoint_overrides": [],
+                    "service": null
+                }]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_published_snapshot_carries_the_device_and_needs_no_privileges() {
+        // The whole point of exporting state: what the daemon writes must be
+        // readable by the app as-is, without a device fetch of its own.
+        let snapshot = snapshot_with_device();
+        assert!(!snapshot.permission_denied);
+        assert!(snapshot.has_live_state());
+        assert_eq!(snapshot.interfaces[0].public_key.as_deref(), Some("abc="));
+    }
+
+    #[test]
+    fn an_empty_export_is_not_trusted_over_a_live_read() {
+        // If the daemon could not see the device either, its file says nothing
+        // useful. Treating it as authoritative would freeze the UI on an empty
+        // view instead of trying the direct read that might work.
+        let empty: Snapshot = serde_json::from_str(
+            r#"{"version":"2.5.3","config_dir":"/etc/innernet",
+                "permission_denied":true,"interfaces":[]}"#,
+        )
+        .unwrap();
+        assert!(empty.permission_denied);
+        assert!(!empty.has_live_state());
+    }
+
+    #[test]
+    fn exported_snapshots_never_contain_a_private_key() {
+        // The export lands in a world-readable file, so the guarantee that it
+        // holds only public data has to be explicit. A private key would show
+        // up as a field the struct does not have -- this pins that the shape
+        // carries public keys only.
+        let body = serde_json::to_string(&snapshot_with_device()).unwrap();
+        assert!(body.contains("public_key"));
+        assert!(!body.contains("private_key"));
+        assert!(!body.contains("private-key"));
+    }
+}
+
+#[cfg(test)]
 mod live_state_tests {
     use super::*;
 
@@ -2110,9 +2238,16 @@ mod live_state_tests {
 
     /// A machine with nothing configured is genuinely empty, not unreadable.
     #[test]
-    fn no_interfaces_at_all_is_not_an_escalation() {
+    fn no_interfaces_reports_no_live_state() {
+        // Earlier this asserted the opposite, on the reasoning that "nothing
+        // configured" is a legitimate state. It is -- but it is not *live
+        // state*, and conflating the two is what let a permission-denied read
+        // (no interfaces, because nothing was readable) take the success path
+        // and render an empty card forever. The caller decides what an empty
+        // list means using permission_denied; this method only reports whether
+        // a device was read.
         let s = snapshot(vec![]);
-        assert!(s.has_live_state());
+        assert!(!s.has_live_state());
     }
 
     /// A device with zero peers is a real state (a fresh network), not a

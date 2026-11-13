@@ -21,6 +21,7 @@ use innernet_shared::{
 };
 use std::{
     io,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     thread,
     time::Duration,
@@ -66,6 +67,22 @@ struct Opts {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
+    /// Write a world-readable snapshot of live state for desktop apps
+    ///
+    /// A desktop app cannot read the WireGuard control socket -- it is root-only
+    /// and is recreated that way every time the interface comes up. Asking the
+    /// user to authorise every refresh is not a fix: the socket's permissions
+    /// are not the app's to change, and the request comes back after each start.
+    ///
+    /// The privileged process that already exists -- the boot daemon -- writes
+    /// what it can see to a plain file, and the app reads that. The snapshot
+    /// holds only what is public: keys, endpoints, counters, handshake times.
+    /// The WireGuard private key lives in the config file and is not included.
+    ExportState {
+        /// Interface to export (default: all installed interfaces)
+        interface: Option<Interface>,
+    },
+
     /// Let non-root users read this interface's state
     ///
     /// WireGuard creates its control socket readable by root only, and recreates
@@ -443,16 +460,14 @@ fn up(
                 true,
             )?;
 
-            // WireGuard rewrites its control socket every time the interface
-            // comes up, and the new one is root-only again. Re-sharing each
-            // round keeps a desktop app able to read state after a reboot or a
-            // daemon restart, instead of going blank until someone remembers to
-            // run chmod by hand.
+            // Publish what this privileged process can see, so a desktop app
+            // can read live state as a plain file instead of asking for an
+            // administrator password on every refresh.
             //
             // Best effort: a failure here must not stop the tunnel from being
             // maintained, which is the daemon's actual job.
-            if let Err(e) = share_state(None) {
-                log::warn!("could not share the WireGuard control socket: {e}");
+            if let Err(e) = export_state(opts, Some(&interface)) {
+                log::warn!("could not export state for {interface}: {e}");
             }
         }
 
@@ -944,6 +959,98 @@ fn get_server_capabilities(config: &InterfaceConfig) -> Result<ServerCapabilitie
     }
 }
 
+/// Write a snapshot of live state where an unprivileged reader can see it.
+///
+/// This exists because a GUI has no good options on its own. The WireGuard
+/// control socket is 0700 root and is recreated that way whenever the interface
+/// comes up, so an app either cannot read it, or has to ask for an administrator
+/// password on every refresh. Widening the socket is the wrong answer twice
+/// over: it grants control-channel access to solve a read-only problem, and the
+/// fix is undone at the next start anyway.
+///
+/// The daemon is already root and already fetches every interval, so it is the
+/// natural place to answer the question "what does the network look like right
+/// now". It writes that answer to a plain file; the app reads the file.
+///
+/// What lands in the file is exactly what `show --json` prints: public keys,
+/// endpoints, counters, handshake times. The WireGuard private key is in the
+/// config file and is deliberately not part of a snapshot.
+fn export_state(opts: &Opts, interface: Option<&Interface>) -> Result<(), Error> {
+    let interfaces = interface.map_or_else(
+        || match Device::list(opts.network.backend) {
+            Ok(list) if list.is_empty() => Ok(configured_interfaces(&opts.config_dir)),
+            other => other,
+        },
+        |interface| Ok(vec![**interface]),
+    )?;
+
+    let mut snapshots = Vec::with_capacity(interfaces.len());
+    for name in &interfaces {
+        let name_str = name.as_str_lossy().to_string();
+        let device = Device::get(name, opts.network.backend).ok();
+        let store = match DataStore::open(&opts.data_dir, name) {
+            Ok(store) => store,
+            // A configured interface with no state file yet has never been
+            // fetched, so there is nothing to publish. Skipping keeps the
+            // daemon's own loop from failing on a half-installed interface.
+            Err(_) => continue,
+        };
+        let config = match InterfaceConfig::from_interface(&opts.config_dir, name) {
+            Ok(config) => config,
+            Err(_) => continue,
+        };
+        snapshots.push(json::interface_snapshot(
+            &name_str,
+            device.as_ref(),
+            &store,
+            &config,
+        ));
+    }
+
+    let snapshot = json::Snapshot {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        config_dir: opts.config_dir.display().to_string(),
+        permission_denied: false,
+        interfaces: snapshots,
+    };
+
+    let body = serde_json::to_string_pretty(&snapshot)?;
+    for path in state_export_paths(opts) {
+        write_shared_file(&path, &body)?;
+    }
+    Ok(())
+}
+
+/// Where the exported snapshot goes.
+///
+/// Two locations on purpose. The data directory is the real one and inherits
+/// whatever group the install already set up; a copy under /var/run lets a GUI
+/// find the file without being told where the data directory is.
+fn state_export_paths(opts: &Opts) -> Vec<std::path::PathBuf> {
+    let mut paths = vec![opts.data_dir.join("state.json")];
+    if Path::new("/var/run/innernet").exists() || cfg!(not(target_os = "macos")) {
+        paths.push(PathBuf::from("/var/run/innernet/state.json"));
+    }
+    paths
+}
+
+/// Write a file readable by everyone, atomically.
+///
+/// The snapshot is public information, so 0644 is right -- and it has to be
+/// world-readable or the app cannot read it without privileges, which is the
+/// entire point. Written to a temporary name and renamed so a reader never sees
+/// a half-written file.
+fn write_shared_file(path: &Path, body: &str) -> Result<(), Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Make the WireGuard control sockets readable by non-root accounts.
 ///
 /// A desktop app needs to read live state to show anything useful, and the
@@ -1409,6 +1516,7 @@ fn run(opts: &Opts) -> Result<(), Error> {
             install_opts,
             nat,
         } => install(opts, &hosts, &install_opts, &nat, &invite, listen_port)?,
+        Command::ExportState { interface } => export_state(opts, interface.as_ref())?,
         Command::ShareState { group } => share_state(group.as_deref())?,
         Command::Show {
             short,
