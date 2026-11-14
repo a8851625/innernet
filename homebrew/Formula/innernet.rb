@@ -12,7 +12,7 @@
 class Innernet < Formula
   desc "Private networks over WireGuard, with subnet routing and a web admin UI"
   homepage "https://github.com/a8851625/innernet"
-  version "2.6.6"
+  version "2.6.7"
   license "MIT"
 
   # Each architecture is a separate release archive. Both are declared inside
