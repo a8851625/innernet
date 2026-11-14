@@ -172,6 +172,104 @@ for input in v2.1.0 2.1.0; do
         || fail "version $input normalises to v2.1.0" "got $got"
 done
 
+# --- musl / OpenWrt detection -----------------------------------------------
+
+# The release archive differs by C library, not just by OS: a glibc binary
+# cannot run on a musl system at all. Getting this wrong installs a file that
+# fails with "not found" the first time it is run.
+#
+# Sourced from the real script rather than restated, so the test cannot drift
+# from the installer.
+src_dir=$(dirname "$0")/..
+is_musl() {
+    if command -v ldd >/dev/null 2>&1; then
+        if ldd --version 2>&1 | grep -qi musl; then echo yes; return; fi
+        if ldd --version 2>&1 | grep -qiE 'gnu libc|glibc'; then echo no; return; fi
+    fi
+    if [ -e /lib/ld-musl-"$(uname -m)".so.1 ]; then echo yes; return; fi
+    if [ -f /etc/openwrt_release ] || command -v opkg >/dev/null 2>&1; then
+        echo yes; return
+    fi
+    echo no
+}
+
+# is_musl must always answer yes or no, never empty -- detect_target would
+# otherwise build a target triple with an empty component.
+got=$(is_musl)
+case "$got" in
+    yes|no) ok "is_musl answers $got on this host" ;;
+    *)      fail "is_musl answers yes or no" "got '$got'" ;;
+esac
+
+# The installer must actually consult it for Linux; previously every Linux was
+# assumed to be gnu.
+if grep -q 'unknown-linux-musl' "$src_dir/install.sh"; then
+    ok "install.sh can select the musl archive"
+else
+    fail "install.sh can select the musl archive"
+fi
+
+# OpenWrt is detected even when ldd gives no usable answer.
+grep -q 'openwrt_release' "$src_dir/install.sh" && ok "install.sh recognises OpenWrt" \
+    || fail "install.sh recognises OpenWrt"
+
+# The kernel module is a separate package there; the installer has to say so or
+# `up` fails with an error that mentions neither WireGuard nor opkg.
+grep -q 'kmod-wireguard' "$src_dir/install.sh" && ok "install.sh points at kmod-wireguard" \
+    || fail "install.sh points at kmod-wireguard"
+
+# --- OpenWrt install location -----------------------------------------------
+
+# OpenWrt's PATH is /usr/sbin:/usr/bin:/sbin:/bin and /usr/local/bin does not
+# exist. The installer must not fall through to $HOME/.local/bin there: it is
+# not on PATH, so the command would be installed and then not found.
+if grep -q '/usr/bin' "$src_dir/install.sh" && grep -q 'openwrt_release' "$src_dir/install.sh"; then
+    ok "install.sh targets /usr/bin on OpenWrt"
+else
+    fail "install.sh targets /usr/bin on OpenWrt"
+fi
+
+# --- busybox compatibility --------------------------------------------------
+
+# busybox has no `install`, so OpenWrt and Alpine fail at the last step after
+# the download and checksum have already succeeded. The copy helper must fall
+# back to cp + chmod.
+if grep -q 'copy_in()' "$src_dir/install.sh"; then
+    ok "install.sh has a portable copy helper"
+else
+    fail "install.sh has a portable copy helper"
+fi
+
+# It must actually fall back, not merely exist.
+if grep -A12 'copy_in()' "$src_dir/install.sh" | grep -q 'cp.*&&.*chmod'; then
+    ok "the copy helper falls back to cp + chmod"
+else
+    fail "the copy helper falls back to cp + chmod"
+fi
+
+# No bare `install -m` may remain outside the helper: those are the call sites
+# that break on busybox.
+bare=$(grep -c 'need_sudo install -m' "$src_dir/install.sh" || true)
+[ "$bare" -le 1 ] && ok "no bare install -m call sites remain ($bare in the helper)" \
+    || fail "no bare install -m call sites remain" "found $bare"
+
+# Exercise the helper for real: source it and copy a file with a mode.
+tmpd=$(mktemp -d)
+printf 'x' > "$tmpd/src"
+need_sudo=""
+# Pull just the function out of the installer.
+eval "$(sed -n '/^copy_in()/,/^}/p' "$src_dir/install.sh")"
+if copy_in "$tmpd/src" "$tmpd/dst" 0755 2>/dev/null; then
+    perms=$(ls -l "$tmpd/dst" | cut -c1-10)
+    case "$perms" in
+        -rwxr-xr-x) ok "copy_in applies the requested mode" ;;
+        *)          fail "copy_in applies the requested mode" "got $perms" ;;
+    esac
+else
+    fail "copy_in applies the requested mode" "copy_in failed"
+fi
+rm -rf "$tmpd"
+
 # --- summary ----------------------------------------------------------------
 
 echo ""

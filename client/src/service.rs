@@ -25,6 +25,55 @@ const INTERVAL_SECS: u64 = 60;
 
 const SYSTEMD_DIR: &str = "/etc/systemd/system";
 const LAUNCHD_DIR: &str = "/Library/LaunchDaemons";
+/// OpenWrt's init directory. Scripts here use the `procd` framework, which is
+/// not systemd: there is no unit file, no daemon-reload, and enablement is a
+/// symlink under /etc/rc.d.
+const PROCD_DIR: &str = "/etc/init.d";
+const PROCD_RC_DIR: &str = "/etc/rc.d";
+
+/// Which service manager this machine actually has.
+///
+/// Decided at runtime, not by target triple: OpenWrt and a conventional Linux
+/// distribution are both `target_os = "linux"`, and choosing systemd on a router
+/// produced `could not write to /etc/systemd/system` on a machine that has no
+/// such directory. Presence of the manager's own directory is the honest test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceManager {
+    Systemd,
+    Procd,
+    Launchd,
+    Unsupported,
+}
+
+fn detect_service_manager() -> ServiceManager {
+    if cfg!(target_os = "macos") {
+        return ServiceManager::Launchd;
+    }
+    if !cfg!(target_os = "linux") {
+        return ServiceManager::Unsupported;
+    }
+
+    // procd first. A router running procd has no /etc/systemd, but the reverse
+    // is also worth handling: some images ship both directories, and the init
+    // that is actually running is the one that matters.
+    let procd = Path::new(PROCD_DIR).is_dir() && Path::new("/sbin/procd").exists();
+    let systemd = Path::new(SYSTEMD_DIR).is_dir();
+
+    match (procd, systemd) {
+        (true, false) => ServiceManager::Procd,
+        (false, true) => ServiceManager::Systemd,
+        // Both present: ask PID 1, which cannot lie about who is supervising.
+        (true, true) => {
+            let init = fs::read_to_string("/proc/1/comm").unwrap_or_default();
+            if init.trim() == "procd" {
+                ServiceManager::Procd
+            } else {
+                ServiceManager::Systemd
+            }
+        },
+        (false, false) => ServiceManager::Unsupported,
+    }
+}
 
 /// Path of the binary that is currently executing, so the generated unit runs
 /// the same install the user invoked rather than a hardcoded /usr/bin path.
@@ -42,10 +91,13 @@ fn require_root() -> Result<(), Error> {
     // Probed by writing, rather than calling geteuid, to avoid taking a libc
     // dependency in this crate for a single check. The probe directory is the
     // one we are about to write to anyway, so a false pass is impossible.
-    let probe_dir = if cfg!(target_os = "macos") {
-        LAUNCHD_DIR
-    } else {
-        SYSTEMD_DIR
+    let probe_dir = match detect_service_manager() {
+        ServiceManager::Launchd => LAUNCHD_DIR,
+        ServiceManager::Systemd => SYSTEMD_DIR,
+        ServiceManager::Procd => PROCD_DIR,
+        ServiceManager::Unsupported => {
+            bail!("this system has no supported service manager (systemd, procd, or launchd)")
+        },
     };
     if let Err(e) = fs::metadata(probe_dir) {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -73,29 +125,125 @@ pub fn install(interface: &Interface) -> Result<(), Error> {
     let exe = exe.to_str().context("executable path is not valid UTF-8")?;
     let name = interface.as_str_lossy().to_string();
 
-    if cfg!(target_os = "linux") {
-        install_systemd(&name, exe)
-    } else if cfg!(target_os = "macos") {
-        install_launchd(&name, exe)
-    } else {
-        bail!(
-            "installing a service is only supported on Linux and macOS.\n\
-             On other systems run this in the background yourself:\n\n    \
+    match detect_service_manager() {
+        ServiceManager::Systemd => install_systemd(&name, exe),
+        ServiceManager::Procd => install_procd(&name, exe),
+        ServiceManager::Launchd => install_launchd(&name, exe),
+        ServiceManager::Unsupported => bail!(
+            "installing a service is not supported on this system.\n\
+             Run this in the background yourself:\n\n    \
              {exe} up -d --interval {INTERVAL_SECS} {name}"
-        )
+        ),
     }
 }
 
 pub fn uninstall(interface: &Interface) -> Result<(), Error> {
     require_root()?;
     let name = interface.as_str_lossy().to_string();
-    if cfg!(target_os = "linux") {
-        uninstall_systemd(&name)
-    } else if cfg!(target_os = "macos") {
-        uninstall_launchd(&name)
-    } else {
-        bail!("installing a service is only supported on Linux and macOS")
+    match detect_service_manager() {
+        ServiceManager::Systemd => uninstall_systemd(&name),
+        ServiceManager::Procd => uninstall_procd(&name),
+        ServiceManager::Launchd => uninstall_launchd(&name),
+        ServiceManager::Unsupported => {
+            bail!("this system has no supported service manager (systemd, procd, or launchd)")
+        },
     }
+}
+
+// ---------------------------------------------------------------------------
+// procd (OpenWrt)
+// ---------------------------------------------------------------------------
+
+/// Init script path for one interface.
+///
+/// `/etc/rc.common` dispatches to procd, so the script is a small sh file rather
+/// than a unit description. The name is prefixed to keep it distinguishable from
+/// OpenWrt's own services.
+fn procd_script_path(name: &str) -> PathBuf {
+    Path::new(PROCD_DIR).join(format!("innernet-{name}"))
+}
+
+fn procd_script(name: &str, exe: &str) -> String {
+    // START=99: after networking, WireGuard modules and the usual VPN services.
+    // OpenWrt orders by these numbers, and starting before the interface exists
+    // makes the first fetch fail for no reason the user can see.
+    //
+    // `respawn` matters more here than Restart= in systemd: a router's uplink
+    // comes and goes, and procd restarts the daemon when it dies instead of
+    // leaving the tunnel down until the next reboot.
+    format!(
+        "#!/bin/sh /etc/rc.common\n\
+\n\
+# Generated by `innernet install-service {name}`.\n\
+# Remove with `innernet uninstall-service {name}`.\n\
+\n\
+USE_PROCD=1\n\
+START=99\n\
+STOP=10\n\
+\n\
+start_service() {{\n\
+\tprocd_open_instance\n\
+\tprocd_set_param command {exe} up {name} --daemon --interval {INTERVAL_SECS}\n\
+\tprocd_set_param respawn 3600 5 0\n\
+\tprocd_set_param stdout 1\n\
+\tprocd_set_param stderr 1\n\
+\tprocd_close_instance\n\
+}}\n"
+    )
+}
+
+fn install_procd(name: &str, exe: &str) -> Result<(), Error> {
+    let path = procd_script_path(name);
+    fs::write(&path, procd_script(name, exe))
+        .with_context(|| format!("could not write {}", path.display()))?;
+
+    // rc.common reads this bit to decide the script is executable as a service.
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("could not make {} executable", path.display()))?;
+
+    let service = format!("innernet-{name}");
+    run(&path.to_string_lossy(), &["enable"])?;
+    run(&path.to_string_lossy(), &["start"])?;
+
+    println!(
+        "\ninstalled {} \n  enabled and started {service}\n\n\
+         check it with:\n    /etc/init.d/{service} status\n    logread -e innernet -f",
+        path.display()
+    );
+    Ok(())
+}
+
+fn uninstall_procd(name: &str) -> Result<(), Error> {
+    let path = procd_script_path(name);
+    let service = format!("innernet-{name}");
+
+    if path.exists() {
+        // Stop before removing: deleting the script first would leave procd
+        // supervising an instance whose definition no longer exists.
+        let _ = run_quiet(&path.to_string_lossy(), &["stop"]);
+        let _ = run_quiet(&path.to_string_lossy(), &["disable"]);
+        fs::remove_file(&path).with_context(|| format!("could not remove {}", path.display()))?;
+        println!("removed {}", path.display());
+    } else {
+        println!("no service file at {}", path.display());
+    }
+
+    // rc.common's enable created this symlink; removing the script does not
+    // always take it with it, and a dangling rc.d entry makes boot log an error.
+    let rc_link = Path::new(PROCD_RC_DIR).join(format!("S99{service}"));
+    if fs::remove_file(&rc_link).is_ok() {
+        println!("removed {}", rc_link.display());
+    }
+
+    // Same reason as the other managers: the snapshot describes a daemon that is
+    // no longer running, and leaving it makes a disconnected network look
+    // connected to anything that reads it.
+    let stale = "/var/run/innernet/state.json";
+    if fs::remove_file(stale).is_ok() {
+        println!("removed {stale}");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -528,7 +676,11 @@ mod status_tests {
     fn uninstall_removes_the_published_snapshot() {
         let src = include_str!("service.rs");
 
-        for func in ["fn uninstall_launchd", "fn uninstall_systemd"] {
+        for func in [
+            "fn uninstall_launchd",
+            "fn uninstall_systemd",
+            "fn uninstall_procd",
+        ] {
             let start = src.find(func).unwrap_or_else(|| panic!("{func} missing"));
             let end = src[start..]
                 .find("\nfn ")
@@ -541,5 +693,79 @@ mod status_tests {
                 "{func} must delete the stale snapshot, or a disconnected network keeps looking connected"
             );
         }
+    }
+
+    /// The generated OpenWrt init script must be a valid rc.common file.
+    ///
+    /// procd is not systemd: the service is described by a shell script that
+    /// sources /etc/rc.common, and getting the shebang wrong makes OpenWrt
+    /// silently ignore the file rather than report an error.
+    #[test]
+    fn procd_script_is_an_rc_common_service() {
+        let script = procd_script("heheda-mesh", "/usr/bin/innernet");
+
+        assert!(
+            script.starts_with("#!/bin/sh /etc/rc.common"),
+            "must be run by rc.common, got: {}",
+            script.lines().next().unwrap_or("")
+        );
+        assert!(script.contains("USE_PROCD=1"), "procd must be opted into");
+        assert!(
+            script.contains("procd_open_instance") && script.contains("procd_close_instance"),
+            "the daemon has to be registered with procd, or it never runs"
+        );
+        assert!(
+            script.contains("/usr/bin/innernet up heheda-mesh --daemon"),
+            "procd must run the daemon loop, not a one-shot `up`"
+        );
+        // A one-shot `up` exits immediately, which procd would treat as a
+        // crash and respawn forever.
+        assert!(
+            script.contains("--interval"),
+            "daemon mode needs an interval or the loop has nothing to wait on"
+        );
+    }
+
+    /// OpenWrt must be detected as procd, not systemd.
+    ///
+    /// Both are `target_os = "linux"`, so the old `cfg!(target_os = "linux")`
+    /// sent routers down the systemd path and failed with "could not write to
+    /// /etc/systemd/system" on a machine that has no such directory.
+    #[test]
+    fn a_router_is_not_mistaken_for_systemd() {
+        let src = include_str!("service.rs");
+        let start = src.find("fn detect_service_manager").expect("must exist");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .unwrap_or(src.len());
+        let body = &src[start..end];
+
+        assert!(
+            body.contains("PROCD_DIR"),
+            "detection must look for the procd init directory"
+        );
+        assert!(
+            body.contains("/sbin/procd"),
+            "the procd binary is the honest marker that this is OpenWrt"
+        );
+        assert!(
+            body.contains("/proc/1/comm"),
+            "when both directories exist, PID 1 decides"
+        );
+    }
+
+    /// The init script name has to be prefixed, or it collides with OpenWrt's
+    /// own services (there is already a `wireguard` and a `network` script).
+    #[test]
+    fn procd_script_name_is_namespaced() {
+        let p = procd_script_path("heheda-mesh");
+        let file = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        assert_eq!(file, "innernet-heheda-mesh");
+        assert!(
+            p.starts_with("/etc/init.d"),
+            "OpenWrt only runs scripts from /etc/init.d, got {}",
+            p.display()
+        );
     }
 }

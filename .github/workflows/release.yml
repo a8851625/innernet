@@ -53,6 +53,18 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             container: quay.io/pypa/manylinux_2_28_x86_64
+          # OpenWrt and other musl distributions cannot run the glibc build at
+          # all: there is no glibc loader on the device. This target links musl
+          # statically, so the result is a single file with no runtime
+          # dependencies -- which is also what makes it usable on a router whose
+          # package feed may not carry the libraries a dynamic build would want.
+          #
+          # Built on ubuntu-latest without a container: the musl target needs
+          # the rust-std component plus a static linker, and `musl-tools`
+          # supplies both in one package.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            musl: true
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-latest
@@ -67,6 +79,34 @@ jobs:
           # macOS builds both architectures on the arm64 runner; the other
           # targets build for their host default.
           targets: ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        # Only for the musl target. `musl-tools` provides musl-gcc, which is the
+        # linker cargo needs for the static build; rust-std comes from rustup
+        # below. Without it the build reaches the link step and fails on the
+        # host's glibc-oriented gcc.
+        if: matrix.musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          musl-gcc --version | head -1
+
+      - name: Configure the musl linker
+        # cargo does not infer this. Without the [target.x86_64-unknown-linux-musl]
+        # section it invokes the host `cc`, which links against glibc and
+        # produces a binary that is not static and will not run on OpenWrt.
+        if: matrix.musl
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .cargo
+          target='${{ matrix.target }}'
+          cat >> .cargo/config.toml <<EOF
+          [target.$target]
+          linker = "musl-gcc"
+          rustflags = ["-C", "target-feature=+crt-static"]
+          EOF
+          cat .cargo/config.toml
 
       - name: Verify the toolchain (Linux, container)
         # Nothing to install: SQLite is compiled in (rusqlite "bundled"), and the
@@ -94,7 +134,9 @@ jobs:
       # host. The glibc floor is a hard compatibility promise, so assert it
       # rather than discovering it from a user's "version GLIBC_2.34 not found".
       - name: Assert the glibc floor
-        if: runner.os == 'Linux'
+        # glibc builds only: the musl target has no glibc dependency at all, and
+        # objdump finds nothing to check (which would fail the step).
+        if: runner.os == 'Linux' && !matrix.musl
         shell: bash
         run: |
           set -euo pipefail
@@ -111,6 +153,27 @@ jobs:
             fi
           done
           exit $fail
+
+      - name: Assert the musl binary is static
+        # The whole point of this target: no interpreter, no shared libraries, so
+        # it runs on a router with no glibc and no package dependencies. A
+        # dynamically linked result here would fail on the device at exec time
+        # with "not found", which is indistinguishable from a missing file.
+        if: matrix.musl
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in target/${{ matrix.target }}/release/innernet \
+                     target/${{ matrix.target }}/release/innernet-server; do
+            echo "== $(basename "$bin")"
+            file "$bin"
+            if readelf -d "$bin" 2>/dev/null | grep -q NEEDED; then
+              echo "::error::$(basename "$bin") has shared library dependencies"
+              readelf -d "$bin" | grep NEEDED
+              exit 1
+            fi
+            echo "no NEEDED entries -- statically linked"
+          done
 
       - name: Package
         shell: bash

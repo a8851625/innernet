@@ -96,12 +96,54 @@ done
 
 # --- platform detection -----------------------------------------------------
 
+# Whether the C library is musl rather than glibc.
+#
+# A glibc binary simply does not run on a musl system: there is no ld-linux
+# loader, and the failure is "not found", which looks like a missing file. So
+# the choice of release archive has to follow the C library, not just the OS.
+#
+# Probed by running `ldd` on the shell itself, because /lib/ld-musl-* paths
+# differ between OpenWrt, Alpine and vendor images. `ldd --version` is not
+# portable (busybox ldd has no such flag), and reading /etc/os-release misses
+# musl-on-glibc-distro setups.
+is_musl() {
+    if command -v ldd >/dev/null 2>&1; then
+        # musl's ldd prints "musl libc" or the loader path; glibc prints
+        # "GNU libc" or "GLIBC". busybox ldd prints neither, so fall through.
+        if ldd --version 2>&1 | grep -qi musl; then
+            echo yes
+            return
+        fi
+        if ldd --version 2>&1 | grep -qiE 'gnu libc|glibc'; then
+            echo no
+            return
+        fi
+    fi
+    # No usable ldd, or busybox's. Look for the loader itself.
+    if [ -e /lib/ld-musl-"$(uname -m)".so.1 ]; then
+        echo yes
+        return
+    fi
+    # OpenWrt is always musl, whatever else is true.
+    if [ -f /etc/openwrt_release ] || command -v opkg >/dev/null 2>&1; then
+        echo yes
+        return
+    fi
+    echo no
+}
+
 detect_target() {
     os=$(uname -s)
     arch=$(uname -m)
 
     case "$os" in
-        Linux)  os_part="unknown-linux-gnu" ;;
+        Linux)
+            if [ "$(is_musl)" = "yes" ]; then
+                os_part="unknown-linux-musl"
+            else
+                os_part="unknown-linux-gnu"
+            fi
+            ;;
         Darwin) os_part="apple-darwin" ;;
         *)
             die "unsupported OS: $os. This script handles Linux and macOS.
@@ -200,11 +242,49 @@ Refusing to install. Re-run with --no-verify only if you trust the download."
 
 # --- install ----------------------------------------------------------------
 
+# copy_in <src> <dst> <mode>
+#
+# `install -m` is the obvious way to put a file in place, but busybox does not
+# ship it: on OpenWrt and Alpine the command is simply absent, so the install
+# died at the final step -- after the download, the checksum and the extraction
+# had all succeeded, which is the worst place to fail because it looks like a
+# permissions problem.
+#
+# cp + chmod is POSIX and present everywhere. The `install` path is kept where
+# it exists because it also handles the case of replacing a running binary.
+#
+# Uses the caller's $need_sudo: a shell function is not visible to `sudo`, so
+# the privilege wrapper has to go on each command rather than on the call.
+copy_in() {
+    _src=$1
+    _dst=$2
+    _mode=$3
+    if command -v install >/dev/null 2>&1; then
+        $need_sudo install -m "$_mode" "$_src" "$_dst"
+    else
+        $need_sudo cp "$_src" "$_dst" && $need_sudo chmod "$_mode" "$_dst"
+    fi
+}
+
 choose_bin_dir() {
     if [ -n "$BIN_DIR" ]; then
         printf '%s' "$BIN_DIR"
         return
     fi
+
+    # OpenWrt first: its PATH is /usr/sbin:/usr/bin:/sbin:/bin, and
+    # /usr/local/bin does not exist there at all. Without this branch the
+    # fallback below picks $HOME/.local/bin, which is not on PATH either, so the
+    # install "succeeds" and the command is then not found.
+    #
+    # /usr/bin here lives on the overlay filesystem, so it survives a reboot --
+    # which matters on a router that reboots unattended.
+    if { [ -f /etc/openwrt_release ] || command -v opkg >/dev/null 2>&1; } \
+        && [ "$(id -u)" = "0" ]; then
+        printf '/usr/bin'
+        return
+    fi
+
     # Prefer /usr/local/bin, fall back to a user-owned directory rather than
     # demanding sudo.
     if [ -w /usr/local/bin ] 2>/dev/null; then
@@ -311,7 +391,7 @@ The release may not include this platform."
     fi
 
     for name in "$BIN_NAME" "$SERVER_BIN_NAME"; do
-        $need_sudo install -m 0755 "$src_dir/$name" "$dest/$name" \
+        copy_in "$src_dir/$name" "$dest/$name" 0755 \
             || die "could not install $name to $dest"
     done
 
@@ -321,7 +401,7 @@ The release may not include this platform."
         if $need_sudo mkdir -p "$man_dir" 2>/dev/null; then
             for page in innernet.8 innernet-server.8; do
                 if [ -f "$src_dir/doc/$page" ]; then
-                    $need_sudo install -m 0644 "$src_dir/doc/$page" "$man_dir/$page" 2>/dev/null || true
+                    copy_in "$src_dir/doc/$page" "$man_dir/$page" 0644 2>/dev/null || true
                 fi
             done
         fi
@@ -352,6 +432,24 @@ The release may not include this platform."
     if [ -d /etc/innernet ] && [ "$(uname -s)" = "Darwin" ]; then
         dim ""
         dim "tip: innernet needs root or the 'innernet' group to manage interfaces."
+    fi
+
+    # OpenWrt needs the kernel side installed separately: the module is not
+    # built into the stock image, and without it `up` fails at the first netlink
+    # call with an error that names neither WireGuard nor the missing package.
+    if [ -f /etc/openwrt_release ] || command -v opkg >/dev/null 2>&1; then
+        info ""
+        if [ -e /sys/module/wireguard ]; then
+            dim "WireGuard kernel module: present"
+        else
+            warn "WireGuard kernel module is not loaded"
+            dim "  install it first, or 'innernet up' cannot create the interface:"
+            dim "    opkg update && opkg install kmod-wireguard"
+        fi
+        dim ""
+        dim "on this system the boot service is a procd init script:"
+        dim "  sudo innernet install-service <interface>"
+        dim "  /etc/init.d/innernet-<interface> status"
     fi
 }
 
