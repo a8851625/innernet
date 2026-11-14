@@ -109,6 +109,23 @@
   .led.down { background: var(--text-faint); }
   .network-name { font-size: 13.5px; font-weight: 590; letter-spacing: -0.01em; }
 
+  /* Stopped network: state plus the one action, no stale tunnel data. */
+  .disconnected {
+    padding: 30px 20px 26px;
+    display: flex; flex-direction: column; align-items: center; gap: 9px;
+    text-align: center;
+  }
+  .disconnected-title {
+    font-size: 13px; font-weight: 600; color: var(--text);
+  }
+  .disconnected-body {
+    margin: 0; max-width: 380px;
+    font-size: 12px; line-height: 1.55; color: var(--text-dim);
+  }
+  .disconnected-actions {
+    display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  }
+
   .chip {
     font-size: 10.5px; padding: 2px 7px; border-radius: 5px;
     background: var(--surface-3); color: var(--text-dim); white-space: nowrap;
@@ -842,33 +859,29 @@ function renderNetwork(iface) {
 
   const head = document.createElement("div");
   head.className = "network-head";
+  // The LED reflects the boot service, not `is_up`.
+  //
+  // `is_up` only says the WireGuard device could be opened, which stays true
+  // once permissions are granted even after the service is gone. A green LED on
+  // a stopped tunnel is the single most misleading thing this window did.
+  const svcRunning = !!(iface.service && iface.service.running);
   head.innerHTML =
-    '<span class="led ' + (iface.is_up ? "up" : "down") + '"></span>' +
+    '<span class="led ' + (svcRunning ? "up" : "down") + '"></span>' +
     '<span class="network-name">' + esc(iface.name) + "</span>" +
     '<span class="chip mono">' + esc(iface.address) + "/" + esc(iface.network_cidr_prefix) + "</span>" +
     (iface.listen_port ? '<span class="chip mono">:' + esc(iface.listen_port) + "</span>" : "") +
     '<div class="grow"></div>';
 
-  // Sync duplicates work the daemon already does.
+  // No manual sync control.
   //
-  // `innernet fetch` writes the state file and updates the WireGuard device, so
-  // it needs root, which on macOS means a password prompt every time. But when
-  // the boot service is running it already fetches on an interval -- a manual
-  // Sync is the same call, just with a prompt attached. Offering it anyway
-  // teaches the user that this app asks for a password constantly.
+  // A running service already fetches every interval, so a button would be the
+  // same call with a password prompt attached. And when the service is *not*
+  // running the call cannot succeed at all: `innernet fetch` refuses with
+  // "Interface is not up. Use 'innernet up' instead", so the button's only
+  // possible outcome was a prompt followed by an error. There is no state in
+  // which it did something useful, which is why it is gone rather than hidden.
   //
-  // So the button is only shown when nothing is fetching automatically.
-  const autoFetching = iface.service && iface.service.running;
-  if (!autoFetching) {
-    const syncBtn = document.createElement("button");
-    syncBtn.className = "subtle sm";
-    syncBtn.textContent = "Sync now";
-    syncBtn.title = iface.service && iface.service.installed
-      ? "The boot service is stopped, so nothing is refreshing the peer list"
-      : "Fetch the latest peer list and CIDR config";
-    syncBtn.onclick = () => run({ fetch: { interface: iface.name } });
-    head.appendChild(syncBtn);
-  }
+  // Re-reading local state is Refresh's job, and it needs no privileges.
 
   // One switch: is this network connected or not.
   //
@@ -912,6 +925,19 @@ function renderNetwork(iface) {
 
   net.appendChild(head);
 
+  // When the tunnel is down, show nothing that only a running tunnel could
+  // report.
+  //
+  // The peer rows are the problem this fixes: they carry last-handshake times
+  // and transfer counters, and rendering them under a stopped network presents
+  // a frozen snapshot as the current situation. Labelling it was not enough --
+  // the numbers still read as live. The roster is not useful until the tunnel
+  // is back, so the card shows the state and the one action that changes it.
+  if (!connected) {
+    net.appendChild(renderDisconnectedPanel(iface));
+    return net;
+  }
+
   // tabs
   const tab = activeTab[iface.name] || "peers";
   const tabs = document.createElement("div");
@@ -930,6 +956,48 @@ function renderNetwork(iface) {
   else net.appendChild(renderActivityPanel());
 
   return net;
+}
+
+/// What a stopped network shows: its state, and nothing it cannot know.
+///
+/// Deliberately no peer list, no handshake times, no transfer counters. All of
+/// those describe a tunnel that is not running, and showing them -- even with a
+/// caption saying so -- is what made a disconnected network look connected.
+function renderDisconnectedPanel(iface) {
+  const wrap = document.createElement("div");
+  wrap.className = "disconnected";
+
+  const title = document.createElement("div");
+  title.className = "disconnected-title";
+  title.textContent = "Not connected";
+  wrap.appendChild(title);
+
+  const body = document.createElement("p");
+  body.className = "disconnected-body";
+  body.textContent =
+    "This network is configured but not running. Connect to bring the tunnel " +
+    "up and keep it up across restarts.";
+  wrap.appendChild(body);
+
+  const actions = document.createElement("div");
+  actions.className = "disconnected-actions";
+
+  const connect = document.createElement("button");
+  connect.className = "primary";
+  connect.textContent = "Connect";
+  connect.onclick = () => run({ install_service: { interface: iface.name } });
+  actions.appendChild(connect);
+
+  // Configuration is kept across a disconnect, so this stays available -- it is
+  // the only way to check what the network is meant to be while it is down.
+  const settings = document.createElement("button");
+  settings.className = "subtle sm";
+  settings.textContent = "Settings";
+  settings.onclick = () => openNetworkSettings(iface);
+  actions.appendChild(settings);
+
+  wrap.appendChild(actions);
+  return wrap;
 }
 
 function renderPeersPanel(iface) {
@@ -1438,7 +1506,12 @@ async function generateInvite(iface) {
         '<div class="warn">Send this file to the device over a trusted channel, then delete it. ' +
         "It contains the peer&rsquo;s private key and can be used only once.</div>",
       footer: [
-        { label: "Reveal in Finder", kind: "subtle", onClick: () => run({ fetch: { interface: iface.name } }, { quiet: true }) },
+        // No "Reveal in Finder" here. The button existed from the GUI's first
+        // version and never did that: it invoked `innernet fetch`, which syncs
+        // peers from the server and synchronously asks for authorisation. So it
+        // prompted for a password and changed network state, while the user
+        // believed they were about to see a file. The path is printed in the
+        // body above, which is enough to find it.
         { label: "Done", kind: "primary", onClick: closeDialog },
       ],
     });
@@ -1710,9 +1783,28 @@ async function load() {
       const prevCount = snapshot ? snapshot.interfaces.length : -1;
       snapshot = state.snapshot;
       const ifaces = (snapshot && snapshot.interfaces) || [];
-      const connected = ifaces.flatMap((i) => i.peers || [])
+
+      // Whether the tunnel is up is a property of the boot service, not of the
+      // interface list.
+      //
+      // `is_up` in the snapshot means "this process could open the WireGuard
+      // device" -- a permissions check. It stays true after the service stops,
+      // because the device file is still there and still readable. Reading it
+      // as "connected" is what made a disconnected network look connected.
+      //
+      // The service's own running state is the honest signal: it is asked of
+      // launchd/systemctl on every read, so it cannot outlive the process it
+      // describes.
+      const running = ifaces.some((i) => i.service && i.service.running);
+
+      // Peers that are actually reachable right now. The list itself is a
+      // roster: it includes every configured member, most of which are usually
+      // offline. Counting the list would report "4 peers" for a network where
+      // nothing is connected.
+      const onlinePeers = ifaces.flatMap((i) => i.peers || [])
         .filter((p) => p.is_connected && !p.is_you).length;
-      const anyUp = ifaces.some((i) => i.is_up);
+
+      const anyUp = running;
 
       // Setup is finished when this machine is actually installed, and the only
       // evidence of that is the boot service -- not a readable peer list.
@@ -1764,9 +1856,15 @@ async function load() {
           : "member";
         setRoleChip(role === "disabled" ? "member" : role);
 
-        setStatus(anyUp ? "on" : "off",
-          (anyUp ? "connected" : "down") + " · " + connected +
-          " peer" + (connected === 1 ? "" : "s"));
+        // Say which of the two things is true, and say it with the right noun.
+        // "connected · 2 peers" was ambiguous at best: the count included
+        // offline members, and "connected" was true even with the service gone.
+        if (anyUp) {
+          setStatus("on", "connected · " + onlinePeers + " online");
+        } else {
+          const total = ifaces.reduce((n, i) => n + (i.peers || []).length, 0);
+          setStatus("off", total > 0 ? "disconnected · " + total + " known" : "disconnected");
+        }
         renderMain();
       }
     } else {

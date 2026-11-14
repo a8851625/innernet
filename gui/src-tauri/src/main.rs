@@ -1578,6 +1578,43 @@ fn run_action(action: Action) -> ActionResult {
         res.needs_admin = e.contains("401") || e.contains("Unauthorized");
     }
 
+    // Joining a network is only half the job.
+    //
+    // `innernet install` writes the config and stops there; it prints a note
+    // telling the reader to run `install-service` themselves. That is fine for
+    // someone in a terminal and wrong for this app: the user has just said
+    // "join this network", and the network is not usable until a service keeps
+    // it up. Leaving it meant Join produced nothing visible, the setup screen
+    // reappeared immediately, and the user was asked to authorise a second time
+    // for a step they had already agreed to.
+    //
+    // The service install happens inside the same flow, so it is one decision
+    // for the user rather than two. Best effort with respect to the *report*:
+    // a failure here is appended to the result instead of discarding the fact
+    // that the join itself succeeded.
+    if res.ok {
+        if let Action::Install { .. } = action {
+            let iface = first_interface_name(&binary);
+            if let Some(iface) = iface {
+                let installed =
+                    run_privileged(&binary, &["install-service".to_string(), iface.clone()]);
+                if installed.ok {
+                    res.stdout = format!("{}\nservice installed for {iface}", res.stdout.trim());
+                    // Publish once so the window has data before the daemon's
+                    // first interval elapses.
+                    let _ = run_privileged(&binary, &["export-state".to_string(), iface]);
+                } else {
+                    let detail = installed.stderr.trim();
+                    res.stderr = format!(
+                        "joined, but could not start it: {}",
+                        if detail.is_empty() { "the service was not installed" } else { detail }
+                    );
+                    res.ok = false;
+                }
+            }
+        }
+    }
+
     res.command = display;
     res
 }
@@ -2832,6 +2869,45 @@ mod live_state_tests {
         assert!(
             !after[..first_return].contains("STATE_READ_AUTHORISED.set"),
             "a failed setup must not be recorded as authorised"
+        );
+    }
+
+    /// Joining a network must also start it.
+    ///
+    /// `innernet install` writes the config and then prints a note telling the
+    /// reader to run `install-service` themselves -- acceptable in a terminal,
+    /// wrong in this app. Join produced nothing usable, the setup screen
+    /// reappeared at once, and the user was asked to authorise a second time for
+    /// a step they had already agreed to.
+    #[test]
+    fn joining_a_network_also_installs_the_service() {
+        let src = include_str!("main.rs");
+        let start = src
+            .find("fn run_action(action: Action)")
+            .expect("run_action must exist");
+        let end = src[start..]
+            .find("\n/// ")
+            .map(|i| start + i)
+            .unwrap_or(src.len());
+        let body = &src[start..end];
+
+        assert!(
+            body.contains("Action::Install { .. }"),
+            "run_action must have a Join-specific branch"
+        );
+        assert!(
+            body.contains("install-service"),
+            "joining must install the boot service, not just write the config"
+        );
+        assert!(
+            body.contains("export-state"),
+            "the snapshot must be published at once, not after a 60s interval"
+        );
+        // The join itself succeeded even if the service did not; the failure has
+        // to be reported rather than swallowed.
+        assert!(
+            body.contains("joined, but could not start it"),
+            "a failed auto-start must be surfaced"
         );
     }
 }
